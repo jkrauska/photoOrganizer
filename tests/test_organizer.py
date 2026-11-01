@@ -483,3 +483,21 @@ def test_worker_ignores_a_stale_stop_file(env, tmp_path):
     add(conn, [str(src)])
     worker(conn, str(dest), db, str(stop), exit_when_empty=True)
     assert files_under(dest) == ['2020/10/2020-10-10/IMG_1.jpg']
+
+
+def test_prune_removes_folders_left_with_only_thumbnail_caches(tmp_path):
+    from photo_organizer.cleanup import prune_empty_dirs
+    root = tmp_path / 'Before 2010'
+    for m in ('05', '11'):
+        thumb = root / '2006' / m / '.@__thumb'
+        thumb.mkdir(parents=True)
+        (thumb / f's800IMG_{m}.JPG').write_bytes(b'thumb')
+    (root / '2006' / '.DS_Store').write_bytes(b'x')
+    keep = root / '2007' / '01'
+    (keep / '@eaDir').mkdir(parents=True)
+    (keep / 'IMG_1.JPG').write_bytes(b'photo')
+
+    prune_empty_dirs(str(root))
+
+    assert not (root / '2006').exists()
+    assert (keep / 'IMG_1.JPG').exists() and (keep / '@eaDir').exists()

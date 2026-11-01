@@ -11,6 +11,8 @@ ALL_EXTENSIONS = MEDIA_EXTENSIONS | SIDECAR_EXTENSIONS
 
 # Junk files that may be deleted when they are the only thing left in a directory.
 JUNK_NAMES = {'.DS_Store', 'Thumbs.db', 'Icon\r', 'desktop.ini', '.dropbox.device', '.dropbox'}
+# NAS thumbnail caches (QNAP / Synology): regenerable, so a folder holding only these is empty.
+THUMB_CACHE_DIRS = {'.@__thumb', '@eaDir'}
 
 SKIP_NAMES = JUNK_NAMES | {
     '.Trashes', '.Spotlight-V100', '.fseventsd', '.DocumentRevisions-V100', '.TemporaryItems',

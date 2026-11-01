@@ -1,17 +1,19 @@
 """Remove source folders emptied by transfers."""
 
 import os
+import shutil
 
-from photo_organizer.constants import JUNK_NAMES
+from photo_organizer.constants import JUNK_NAMES, THUMB_CACHE_DIRS
 from photo_organizer.scanner import should_skip_dir
 
 
 def _is_junk(name):
-    return name in JUNK_NAMES or name.startswith('._')
+    return name in JUNK_NAMES or name in THUMB_CACHE_DIRS or name.startswith('._')
 
 
 def prune_empty_dirs(root, verbose=False):
-    """Delete folders under root that hold nothing but OS junk files, deepest first, including
+    """Delete folders under root that hold nothing but OS junk files and NAS thumbnail caches
+    (.@__thumb, @eaDir), deepest first, including
     root itself once it is emptied. Never removes a mount point, and never enters NAS
     snapshot/recycle folders or app bundles. Returns the number of folders removed."""
 
@@ -33,7 +35,11 @@ def prune_empty_dirs(root, verbose=False):
             return removed, False
         try:
             for name in remaining:
-                os.unlink(os.path.join(path, name))
+                p = os.path.join(path, name)
+                if name in THUMB_CACHE_DIRS and os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p)
+                else:
+                    os.unlink(p)
             os.rmdir(path)
         except OSError:
             return removed, False
