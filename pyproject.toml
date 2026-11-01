@@ -1,0 +1,19 @@
+[project]
+name = "photo-organizer"
+version = "0.1.0"
+description = "Sort and move photos into YEAR/MONTH/YYYY-MM-DD structure with SQLite tracking"
+requires-python = ">=3.10"
+dependencies = [
+    "humanize>=4.15.0",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+photo-organizer = "photo_organizer.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/photo_organizer"]
