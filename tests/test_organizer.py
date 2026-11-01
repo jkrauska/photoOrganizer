@@ -469,3 +469,17 @@ def test_run_tracks_large_files_end_to_end(env, monkeypatch):
     go()
     assert files_under(dest) == ['2020/09/2020-09-09/IMG_1.jpg']
     assert rows()[photo]['status'] == 'done' and not os.path.exists(photo)
+
+
+def test_worker_ignores_a_stale_stop_file(env, tmp_path):
+    from photo_organizer.db import init_db
+    from photo_organizer.work_queue import add, worker
+    src, dest, go, rows = env
+    make_jpeg(f"{src}/a/IMG_1.jpg", "2020:10:10 10:10:10", (10, 10, 10))
+    stop = tmp_path / 'STOP'
+    stop.touch()                              # left behind by an earlier `make stop`
+    db = str(tmp_path / 'local' / 'catalog.db')
+    conn = init_db(db)
+    add(conn, [str(src)])
+    worker(conn, str(dest), db, str(stop), exit_when_empty=True)
+    assert files_under(dest) == ['2020/10/2020-10-10/IMG_1.jpg']

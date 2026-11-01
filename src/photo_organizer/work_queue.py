@@ -23,7 +23,7 @@ from photo_organizer.dates import DEFAULT_EXIF_WORKERS, require_exiftool
 from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, init_db
 from photo_organizer.constants import is_time_machine_path
 from photo_organizer.scanner import is_within
-from photo_organizer.state import DEFAULT_STOP_FILE, shutdown_requested, signal_handler
+from photo_organizer.state import DEFAULT_STOP_FILE, configure_stop_file, shutdown_requested, signal_handler
 
 IDLE_POLL_SECONDS = 5
 
@@ -107,6 +107,7 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
     """Process queued folders in order; wait for more when the queue is empty."""
     conn.execute("UPDATE queue SET status = 'queued' WHERE status = 'running'")  # crash recovery
     conn.commit()
+    configure_stop_file(stop_file)   # a stop file left by an earlier stop must not stop this worker
     print(f"Queue worker {os.getpid()} → {dest}  (stop: make stop / Ctrl-C)")
     while True:
         if shutdown_requested() or os.path.exists(stop_file):
@@ -159,6 +160,8 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
             conn.execute("UPDATE queue SET status = 'queued', result = 'stopped; resumes next time' WHERE id = ?",
                          (item['id'],))
             conn.commit()
+            if os.path.exists(stop_file):
+                os.unlink(stop_file)     # consumed: the next worker starts normally
             print("Stopped; worker exiting. The item stays queued.")
             break
         conn.execute("UPDATE queue SET status = 'done', finished_at = datetime('now'), result = ? WHERE id = ?",
