@@ -24,13 +24,17 @@ ORGANIZE = IFS=',' read -ra src <<< "$(SOURCES)"; args=(); \
 	for s in "$${src[@]}"; do args+=(--source "$$s"); done; \
 	uv run photo-organizer "$${args[@]}" --dest "$(DEST)" \
 	--db "$(CATALOG)" --limit $(LIMIT) --batch-size $(BATCH) --workers $(WORKERS) \
-	--exif-workers $(EXIF_WORKERS) $(if $(YES),--yes)
+	--exif-workers $(EXIF_WORKERS) --stop-file "$(STOP_FILE)" $(if $(YES),--yes)
 
-.PHONY: help sync inventory run status enrich faces browse test
+STOP_FILE ?= $(HOME)/.photo-organizer/STOP
+
+.PHONY: help sync inventory run stop verify status enrich faces browse test
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
 	@echo "make run        move into DEST, verify, delete sources (LIMIT=n, YES=1 to skip prompts)"
+	@echo "make stop       stop a running inventory/run gracefully (in-flight files finish)"
+	@echo "make verify     re-read every stored file from the NAS and check its hash"
 	@echo "make status     live status page at http://localhost:$(PORT)/"
 	@echo "make enrich     Gemma 4 + InsightFace analysis, clustering, metadata, index (Apple Photos)"
 	@echo "make faces      face-cluster labeling app"
@@ -51,6 +55,12 @@ inventory: sync | $(LOGDIR)
 
 run: sync | $(LOGDIR)
 	$(ORGANIZE) --execute 2>&1 | tee "$(LOGDIR)/run-$(STAMP).log"
+
+stop:
+	@touch "$(STOP_FILE)" && echo "Stop requested; the run finishes in-flight files and exits. Rerun to resume."
+
+verify: sync | $(LOGDIR)
+	uv run photo-organizer-verify --db "$(CATALOG)" 2>&1 | tee "$(LOGDIR)/verify-$(STAMP).log"
 
 status: sync
 	uv run photo-organizer-status --db "$(CATALOG)" --port $(PORT)

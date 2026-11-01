@@ -34,6 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_group_key ON files(group_key);
 CREATE INDEX IF NOT EXISTS idx_dest_path ON files(dest_path);
 CREATE INDEX IF NOT EXISTS idx_updated_at ON files(updated_at);
 CREATE INDEX IF NOT EXISTS idx_created_at ON files(created_at);
+CREATE INDEX IF NOT EXISTS idx_file_size ON files(file_size);
 
 -- Single 'run' row holding the live run's phase and heartbeat as JSON, read by the status page.
 CREATE TABLE IF NOT EXISTS progress (key TEXT PRIMARY KEY, value TEXT);

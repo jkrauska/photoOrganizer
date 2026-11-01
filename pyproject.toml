@@ -31,6 +31,7 @@ analysis = [
 [project.scripts]
 photo-organizer = "photo_organizer.cli:main"
 photo-organizer-status = "photo_organizer.status:main"
+photo-organizer-verify = "photo_organizer.verify:main"
 photo-analyze = "photo_organizer.analysis.analyze:main"
 photo-cluster-faces = "photo_organizer.analysis.cluster:main"
 photo-enrich = "photo_organizer.analysis.enrich:main"

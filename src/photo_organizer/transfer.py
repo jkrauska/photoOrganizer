@@ -1,13 +1,13 @@
 """Verified copy into the canonical store, then removal of the source.
 
-A source file is deleted only after its bytes are proven to exist in the store:
-- new content: copied, the copy re-hashed and matched, then the source deleted;
-- duplicate content: the canonical copy is re-hashed from disk and matched, then the source deleted.
+A source file is deleted only after its bytes are proven to be on the destination storage:
+- new content: copied in one pass (hashing as it writes), then read back from the NAS with the
+  client cache bypassed and matched, then the source deleted;
+- duplicate content: the canonical copy is re-read from the NAS and matched, then the source deleted.
 Anything that fails verification keeps its source and is marked 'error'.
 """
 
 import os
-import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,20 +15,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import humanize
 
 from photo_organizer.db import NOW_SQL
-from photo_organizer.hashing import sha256_file
+from photo_organizer.hashing import copy_and_hash, sha256_file
 from photo_organizer.progress import set_progress
 from photo_organizer.state import shutdown_requested
 
 
 def recover_interrupted(conn):
-    """Return rows left mid-transfer by a crash to 'pending', removing any partial copy."""
+    """Return rows left mid-transfer by a crash to 'pending', removing their possibly partial copy.
+    The source is still in place for these rows, so the copy is simply redone."""
     rows = conn.execute(
-        "SELECT id, dest_path, sha256 FROM files WHERE status IN ('copying', 'copied')"
+        "SELECT id, dest_path FROM files WHERE status IN ('copying', 'copied')"
     ).fetchall()
     for r in rows:
-        dst = r['dest_path']
-        if dst and os.path.exists(dst) and (not r['sha256'] or sha256_file(dst) != r['sha256']):
-            os.unlink(dst)
+        if r['dest_path'] and os.path.exists(r['dest_path']):
+            os.unlink(r['dest_path'])
     conn.execute("UPDATE files SET status = 'pending' WHERE status IN ('copying', 'copied')")
     conn.commit()
     return len(rows)
@@ -39,7 +39,7 @@ class TransferContext:
         self.conn = conn
         self.db_lock = threading.Lock()
         self.inflight = {}          # sha256 -> Event set when that content's first copy finishes
-        self.verified = {}          # canonical dest_path -> bool (re-hash result this run)
+        self.verified = {}          # canonical dest_path -> bool (NAS re-read result this run)
         self.verify_lock = threading.Lock()
 
     def set_status(self, fid, status, sha=None, message=None, dest_path=None):
@@ -55,7 +55,7 @@ class TransferContext:
         with self.verify_lock:
             if path in self.verified:
                 return self.verified[path]
-        ok = os.path.exists(path) and sha256_file(path) == sha
+        ok = os.path.exists(path) and sha256_file(path, nocache=True) == sha
         with self.verify_lock:
             self.verified[path] = ok
         return ok
@@ -79,7 +79,8 @@ def _remove_duplicate(ctx, fid, src, src_hash, canonical):
 
 def _claim_dest(ctx, fid, planned, src_hash):
     """Final destination name, chosen under db_lock among files actually copied or copying.
-    Planned-but-uncopied rows don't reserve names, so a duplicate's winner keeps the clean name."""
+    Planned-but-uncopied rows don't reserve names, so a duplicate's winner keeps the clean name.
+    An existing file is reused only if it is byte-identical (src_hash known); otherwise skipped."""
     dest_dir = os.path.dirname(planned)
     filename = ctx.conn.execute("SELECT filename FROM files WHERE id = ?", (fid,)).fetchone()[0]
     stem, ext = os.path.splitext(filename)
@@ -90,10 +91,46 @@ def _claim_dest(ctx, fid, planned, src_hash):
             (candidate, fid),
         ).fetchone():
             continue
-        if os.path.exists(candidate) and sha256_file(candidate) != src_hash:
+        if os.path.exists(candidate) and (not src_hash or sha256_file(candidate, nocache=True) != src_hash):
             continue  # stray file not from this catalog; never overwrite it
         return candidate
     raise RuntimeError(f"Too many collisions for {filename} in {dest_dir}")
+
+
+def _could_be_duplicate(ctx, fid, size):
+    """Identical content needs identical size; with no other cataloged file of this size,
+    the separate pre-copy hash (used for duplicate detection) can be skipped."""
+    return ctx.conn.execute(
+        "SELECT 1 FROM files WHERE file_size = ? AND id != ? AND status IN ('pending', 'copying', 'done') LIMIT 1",
+        (size, fid),
+    ).fetchone() is not None
+
+
+def _copy_verify_delete(ctx, fid, src, dst, expected):
+    """Copy src to dst (unless an identical dst already exists), verify from the NAS, delete src."""
+    if os.path.exists(dst):
+        written = expected      # _claim_dest only hands back an existing file that matched expected
+    else:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        try:
+            written = copy_and_hash(src, dst)
+        except BaseException:
+            if os.path.exists(dst):
+                os.unlink(dst)
+            raise
+        if expected and written != expected:
+            os.unlink(dst)
+            ctx.set_status(fid, 'error', expected, "source changed during copy; source kept")
+            return 'error', f"source changed during copy: {src}"
+    if sha256_file(dst, nocache=True) != written:
+        os.unlink(dst)
+        ctx.set_status(fid, 'error', written, "copy read back from destination did not match; source kept")
+        return 'error', f"destination verification failed: {dst}"
+    ctx.set_status(fid, 'done', written)
+    with ctx.verify_lock:
+        ctx.verified[dst] = True
+    os.unlink(src)
+    return 'done', None
 
 
 def transfer_one(ctx, fid, src, planned):
@@ -102,8 +139,16 @@ def transfer_one(ctx, fid, src, planned):
             ctx.set_status(fid, 'error', None, "source missing")
             return 'error', f"source missing: {src}"
 
-        src_hash = sha256_file(src)
+        with ctx.db_lock:
+            fast = not _could_be_duplicate(ctx, fid, os.path.getsize(src))
+            if fast:
+                dst = _claim_dest(ctx, fid, planned, None)
+                ctx.conn.execute("UPDATE files SET status = 'copying', dest_path = ? WHERE id = ?", (dst, fid))
+                ctx.conn.commit()
+        if fast:
+            return _copy_verify_delete(ctx, fid, src, dst, None)
 
+        src_hash = sha256_file(src)
         while True:
             with ctx.db_lock:
                 dup = ctx.conn.execute(
@@ -127,24 +172,7 @@ def transfer_one(ctx, fid, src, planned):
             break
 
         try:
-            if not os.path.exists(dst):
-                # An identical file already at dst (checked in _claim_dest) counts as the canonical copy.
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                try:
-                    shutil.copy2(src, dst)
-                except BaseException:
-                    if os.path.exists(dst):
-                        os.unlink(dst)
-                    raise
-                if sha256_file(dst) != src_hash:
-                    os.unlink(dst)
-                    ctx.set_status(fid, 'error', src_hash, "SHA256 mismatch after copy; source kept")
-                    return 'error', f"SHA256 mismatch after copy: {src}"
-            ctx.set_status(fid, 'done', src_hash)
-            with ctx.verify_lock:
-                ctx.verified[dst] = True
-            os.unlink(src)
-            return 'done', None
+            return _copy_verify_delete(ctx, fid, src, dst, src_hash)
         finally:
             with ctx.db_lock:
                 ctx.inflight.pop(src_hash).set()
@@ -203,6 +231,7 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False):
                       f"{bytes_done / 1_048_576 / elapsed:.1f} MB/s | {workers}w   ",
                       end='', flush=True)
             if shutdown_requested():
+                set_progress(conn, ctx.db_lock, phase='stopping: finishing in-flight files')
                 pool.shutdown(wait=True, cancel_futures=True)
                 break
     print()

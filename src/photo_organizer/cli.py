@@ -14,7 +14,7 @@ from photo_organizer.planner import plan_destinations
 from photo_organizer.progress import finish_run, set_progress, start_run
 from photo_organizer.report import print_report
 from photo_organizer.scanner import PriorCatalogs, is_within, iter_source_files, scan_batch
-from photo_organizer.state import shutdown_requested, signal_handler
+from photo_organizer.state import DEFAULT_STOP_FILE, configure_stop_file, shutdown_requested, signal_handler
 from photo_organizer.transfer import execute_transfers, recover_interrupted
 
 
@@ -23,8 +23,10 @@ def ts():
 
 
 def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit=0,
-        verbose=False, confirm=lambda prompt: True, exif_workers=DEFAULT_EXIF_WORKERS):
+        verbose=False, confirm=lambda prompt: True, exif_workers=DEFAULT_EXIF_WORKERS,
+        stop_file=DEFAULT_STOP_FILE):
     """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals."""
+    configure_stop_file(stop_file)
     conn = init_db(db_path)
     start_run(conn, sources, dest, execute)
     final_phase = 'stopped'
@@ -87,11 +89,14 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
             if exhausted:
                 break
 
-        if execute:
+        stopped = shutdown_requested()
+        if execute and not stopped:
             set_progress(conn, phase='pruning empty folders')
             pruned = sum(prune_empty_dirs(s, verbose) for s in sources)
             print(f"\nRemoved {pruned:,} emptied source folders")
-        if not shutdown_requested():
+        if stopped:
+            print("\nStopped on request; rerun the same command to resume.")
+        else:
             final_phase = 'finished'
         if execute:
             print(f"Catalog backed up to {backup_db(conn, dest)}")
@@ -122,6 +127,8 @@ def main():
     parser.add_argument('--limit', type=int, default=0, help='Process at most N files (0 = no limit)')
     parser.add_argument('--batch-size', type=int, default=5000)
     parser.add_argument('--workers', type=int, default=4, help='Parallel copy/verify threads')
+    parser.add_argument('--stop-file', default=DEFAULT_STOP_FILE,
+                        help=f'Create this file to stop gracefully (default: {DEFAULT_STOP_FILE})')
     parser.add_argument('--exif-workers', type=int, default=DEFAULT_EXIF_WORKERS,
                         help=f'Parallel exiftool processes for date reads (default: {DEFAULT_EXIF_WORKERS})')
     args = parser.parse_args()
@@ -154,7 +161,8 @@ def main():
         sys.exit("Aborted.")
 
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     start = time.time()
     run(sources, dest, args.db, args.execute, args.batch_size, args.workers, args.limit,
-        args.verbose, confirm, args.exif_workers)
+        args.verbose, confirm, args.exif_workers, args.stop_file)
     print(f"\nTotal time: {humanize.naturaldelta(time.time() - start)}")

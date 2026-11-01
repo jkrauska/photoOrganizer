@@ -34,6 +34,7 @@ def env(tmp_path):
 
     def go(sources=None, **kw):
         kw.setdefault('execute', True)
+        kw.setdefault('stop_file', str(tmp_path / 'STOP'))
         return run([str(s) for s in (sources or [src])], str(dest), str(db), **kw)
 
     def rows():
@@ -166,6 +167,48 @@ def test_run_only_moves_its_own_sources(env, tmp_path):
     assert files_under(dest) == ['2020/01/2020-01-02/IMG_1.jpg']
     assert os.path.exists(f"{other}/d/IMG_9.jpg")
     assert rows()[f"{other}/d/IMG_9.jpg"]['status'] == 'pending'
+
+
+def test_stop_file_stops_after_current_batch_and_rerun_resumes(env, tmp_path):
+    src, dest, go, rows = env
+    for i in range(4):
+        make_jpeg(f"{src}/d{i}/IMG_{i}.jpg", f"2020:02:0{i + 1} 00:00:00", (i, 2 * i, 3))
+    stop = tmp_path / 'STOP'
+    batches = []
+
+    def confirm(_prompt):
+        batches.append(1)
+        if len(batches) == 2:
+            stop.touch()        # stop requested once batch 1 is done, before batch 2 transfers
+        return True
+
+    go(batch_size=1, confirm=confirm)
+    assert len(batches) == 2, "no further batch starts after a stop request"
+    assert len(files_under(dest)) == 1, "batch 1 completed; batch 2 transferred nothing"
+    assert len(files_under(src)) == 3, "untouched files stay in place"
+    go(batch_size=1)                  # rerun clears the stale stop file and finishes
+    assert len(files_under(dest)) == 4 and files_under(src) == []
+
+
+def test_unique_size_skips_prehash_but_same_size_duplicates_are_caught(env):
+    src, dest, go, rows = env
+    a = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:03:03 03:03:03", (1, 2, 3))
+    make_jpeg(f"{src}/b/OTHER.jpg", "2020:03:04 03:03:03", (200, 100, 50))
+    os.makedirs(src / 'c')
+    shutil.copy2(a, src / 'c' / 'IMG_1.jpg')
+    go(workers=4)
+    assert files_under(dest) == ['2020/03/2020-03-03/IMG_1.jpg', '2020/03/2020-03-04/OTHER.jpg']
+    assert sorted(r['status'] for r in rows().values()) == ['done', 'done', 'duplicate_removed']
+    assert all(r['sha256'] for r in rows().values())
+
+
+def test_copy_and_hash_never_overwrites(tmp_path):
+    from photo_organizer.hashing import copy_and_hash
+    (tmp_path / 'a').write_bytes(b'new')
+    (tmp_path / 'b').write_bytes(b'existing')
+    with pytest.raises(FileExistsError):
+        copy_and_hash(str(tmp_path / 'a'), str(tmp_path / 'b'))
+    assert (tmp_path / 'b').read_bytes() == b'existing'
 
 
 def test_interrupted_partial_copy_is_recovered(env, tmp_path):
