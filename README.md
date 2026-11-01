@@ -27,6 +27,49 @@ uv run photo-organizer --execute
 uv run photo-organizer --execute --resume
 ```
 
+## Photo Analysis (Gemma 4 + InsightFace)
+
+Analyzes the local Apple Photos library on-device (Apple Silicon, MLX + CoreML):
+Gemma 4 (`mlx-community/gemma-4-31b-it-4bit` via `mlx-vlm`) writes a caption,
+keywords, scene, subjects, setting and visible text per photo, and InsightFace
+`buffalo_l` detects faces and emits 512-d embeddings that are clustered into people.
+
+```bash
+uv sync --extra analysis
+brew install exiftool ffmpeg
+
+scripts/analysis_pipeline.sh -n 5 --no-geocode   # quick test
+scripts/analysis_pipeline.sh                     # full run, resumable
+
+uv run photo-face-browser                        # label face clusters at http://localhost:8000/
+uv run photo-index                               # rebuild photos.db after labeling
+uv run datasette ~/gemma/photos.db -o            # faceted + full-text + map browsing
+```
+
+Steps (each is its own command and resumable, since everything is keyed by Photos UUID):
+
+1. `photo-analyze` → `photo_analysis.jsonl` (Gemma fields + face embeddings; `--model` to swap VLMs)
+2. `photo-cluster-faces` → `face_clusters.json` (DBSCAN, cosine; tune `--eps` / `--min-samples`)
+3. `photo-enrich` → `metadata.jsonl` (exiftool, ffprobe, Nominatim reverse-geocode at ≤1 req/s)
+4. `photo-index` → `photos.db` (SQLite + FTS5; dropped and rebuilt from the sidecars each run)
+
+`photo-face-browser` writes `face_labels.json` (cluster or per-face → name). It binds to
+`127.0.0.1` by default; `--host 0.0.0.0` exposes it on the LAN with no auth.
+
+### Data directory
+
+All sidecars live in one directory, `$PHOTO_ANALYSIS_DIR` or `~/gemma` by default
+(override per command with `--data-dir`). That data is personal and is gitignored, so
+it never lands in this repo. Note that `photos.db` here is unrelated to the organizer's
+`photo_organizer.db`: it covers the Apple Photos library keyed by UUID, not the NAS tree.
+
+### Constraints
+
+- Python 3.11 only (`mlx-vlm` wheels).
+- `pillow-heif` is required, or every HEIC iPhone photo is silently skipped.
+- RAW files are analyzed through Apple's largest JPEG derivative (`analysis_path`).
+- Gated Hugging Face models need `HF_TOKEN` exported (e.g. via a gitignored `.envrc`).
+
 ## Layout
 
 Code lives under `src/photo_organizer/` as a proper package:
@@ -40,6 +83,7 @@ Code lives under `src/photo_organizer/` as a proper package:
 - `report.py` — summary reporting
 - `cli.py` — argument parsing and the batch-processing loop
 - `state.py` — graceful-shutdown flag shared across modules
+- `analysis/` — `analyze`, `cluster`, `enrich`, `index`, `face_browser`, plus `paths` for the data directory
 
 ## How It Works
 

@@ -1,15 +1,38 @@
 [project]
 name = "photo-organizer"
 version = "0.1.0"
-description = "Sort and move photos into YEAR/MONTH/YYYY-MM-DD structure with SQLite tracking"
-requires-python = ">=3.10"
+description = "Sort photos into YEAR/MONTH/YYYY-MM-DD with SQLite tracking, plus Gemma 4 + InsightFace analysis"
+# mlx-vlm wheels are 3.11-only on this stack.
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "humanize>=4.15.0",
     "Pillow>=10.0",
 ]
 
+[project.optional-dependencies]
+analysis = [
+    "osxphotos",
+    # >=0.5 required for gemma4 model_type support.
+    "mlx-vlm>=0.5",
+    "insightface",
+    # Mainline has Apple Silicon + CoreML since 1.17; do not use onnxruntime-silicon (NumPy 2 segfaults).
+    "onnxruntime>=1.17",
+    "opencv-python",
+    "scikit-learn>=1.8.0",
+    "pillow-heif>=1.3.0",
+    "fastapi",
+    "uvicorn",
+    "datasette>=0.65.2",
+    "datasette-cluster-map>=0.18.2",
+]
+
 [project.scripts]
 photo-organizer = "photo_organizer.cli:main"
+photo-analyze = "photo_organizer.analysis.analyze:main"
+photo-cluster-faces = "photo_organizer.analysis.cluster:main"
+photo-enrich = "photo_organizer.analysis.enrich:main"
+photo-index = "photo_organizer.analysis.index:main"
+photo-face-browser = "photo_organizer.analysis.face_browser:main"
 
 [build-system]
 requires = ["hatchling"]

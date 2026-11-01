@@ -2,3 +2,12 @@
 __pycache__/
 *.pyc
 .old/
+.envrc
+.env
+
+# Analysis data: personal photos, face embeddings and labels never go in git.
+*.db
+*.jsonl
+face_clusters.json
+face_labels.json
+face_crops/
