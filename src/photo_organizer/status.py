@@ -143,7 +143,8 @@ PAGE = r"""<!doctype html>
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--fg);
        font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-main { max-width:1100px; margin:0 auto; padding:20px 16px 40px; }
+main { max-width:2400px; margin:0 auto; padding:20px 16px 40px; }
+@media (min-width:1200px) { main { padding:24px 32px 40px; } }
 header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
 h1 { font-size:20px; margin:0; }
 .pill { padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid var(--line); }
@@ -169,6 +170,8 @@ td.n, th.n { text-align:right; }
 svg { width:100%; height:90px; display:block; }
 .two { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
 @media (max-width:760px) { .two { grid-template-columns:1fr; } }
+.activity { display:grid; grid-template-columns:1fr; gap:12px; }
+@media (min-width:1600px) { .activity { grid-template-columns:3fr 2fr; align-items:start; } }
 </style></head><body><main>
 <header><h1>Photo Organizer</h1><span id="pill" class="pill">loading</span><span id="phase" class="muted"></span></header>
 <div class="grid">
@@ -183,8 +186,10 @@ svg { width:100%; height:90px; display:block; }
   <div class="card"><h2>Catalog</h2><table id="statuses"></table></div>
   <div class="card"><h2>Sources</h2><table id="sources"></table></div>
 </div>
-<div class="card" style="margin-bottom:12px"><h2>Recent activity</h2><table id="recent"></table></div>
-<div class="card"><h2>Errors</h2><table id="errors"></table></div>
+<div class="activity">
+  <div class="card"><h2>Recent activity</h2><table id="recent"></table></div>
+  <div class="card"><h2>Errors</h2><table id="errors"></table></div>
+</div>
 <p class="s" id="meta"></p>
 </main>
 <script>
