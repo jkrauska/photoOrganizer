@@ -15,7 +15,8 @@ from threading import Timer
 from urllib.parse import parse_qs, urlparse
 
 from photo_organizer.archive import PAGE as ARCHIVE_PAGE, archive_snapshot, month_detail
-from photo_organizer.db import DEFAULT_DB_PATH
+from photo_organizer.db import DEFAULT_DB_PATH, init_db
+from photo_organizer.work_queue import enqueue
 
 MOVED = "('done', 'duplicate_removed')"
 
@@ -176,6 +177,15 @@ td, th { text-align:left; padding:5px 6px; border-top:1px solid var(--line); ver
 th { color:var(--muted); font-weight:500; border-top:none; }
 td.n, th.n { text-align:right; }
 .path { font-family:ui-monospace, Menlo, monospace; font-size:12px; word-break:break-all; }
+.qform { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+.qform input { flex:1 1 420px; min-width:0; padding:8px 10px; font:13px ui-monospace, Menlo, monospace;
+  color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:6px; }
+.qform input:focus { outline:none; border-color:var(--accent); }
+.qform button, .qbtn { padding:8px 14px; border-radius:6px; border:1px solid var(--accent); background:var(--accent);
+  color:#fff; font-weight:600; cursor:pointer; }
+.qbtn { padding:2px 8px; font-size:12px; font-weight:500; background:transparent; color:var(--muted); border-color:var(--line); }
+.qbtn:hover { color:var(--bad); border-color:var(--bad); }
+#qmsg.ok { color:var(--accent); } #qmsg.err { color:var(--bad); }
 .path .to { color:var(--accent); margin-top:2px; }
 .path .to.st-review, .path .to.st-ignored { color:var(--warn); } .path .to.st-error { color:var(--bad); }
 .st-error { color:var(--bad); } .st-review, .st-ignored { color:var(--warn); } .st-done, .st-duplicate_removed { color:var(--accent); }
@@ -195,7 +205,14 @@ svg { width:100%; height:90px; display:block; }
   <div class="card"><div class="k">Batch</div><div class="v" id="batch">–</div><div class="s" id="batchs"></div>
     <div class="progress"><div id="bar" style="width:0"></div></div></div>
 </div>
-<div class="card" style="margin-bottom:12px"><h2>Queue <span id="worker" class="s" style="text-transform:none;letter-spacing:0"></span></h2><table id="queue"></table></div>
+<div class="card" style="margin-bottom:12px"><h2>Queue <span id="worker" class="s" style="text-transform:none;letter-spacing:0"></span></h2>
+  <form id="qform" class="qform" autocomplete="off">
+    <input id="qpath" list="qdirs" placeholder="/Volumes/Photowork/Masters — type a path; subfolders are suggested" spellcheck="false">
+    <datalist id="qdirs"></datalist>
+    <button type="submit">Add to queue</button>
+    <span id="qmsg" class="s"></span>
+  </form>
+  <table id="queue"></table></div>
 <div class="card" style="margin-bottom:12px"><h2>Moved per minute (last hour)</h2><svg id="chart" preserveAspectRatio="none"></svg></div>
 <div class="two">
   <div class="card"><h2>Catalog</h2><table id="statuses"></table></div>
@@ -273,11 +290,15 @@ function render(d) {
   const w = d.worker || {};
   $('worker').textContent = w.alive ? `· worker ${w.pid}: ${w.state || ''}${w.current ? ' — ' + w.current : ''}`
     : (w.pid ? '· worker not running (make worker-bg)' : '· no worker yet (make worker-bg)');
-  const qt = $('queue'); head(qt, [['#'], ['Status'], ['Folder'], ['Result']]);
-  if (!d.queue.length) { const tr=row(qt); cell(tr, ''); cell(tr, 'empty', 'muted'); cell(tr, 'add folders with make queue SRC=…', 's'); cell(tr, ''); }
+  const qt = $('queue'); head(qt, [['#'], ['Status'], ['Folder'], ['Result'], ['']]);
+  if (!d.queue.length) { const tr=row(qt); cell(tr, ''); cell(tr, 'empty', 'muted'); cell(tr, 'add a folder above', 's'); cell(tr, ''); cell(tr, ''); }
   d.queue.forEach(q => { const tr=row(qt); cell(tr, q.id, 's');
     cell(tr, q.status, 'st-' + ({done:'done', failed:'error', running:'done', queued:'pending', stopped:'review'}[q.status] || ''));
-    cell(tr, q.source, 'path'); cell(tr, q.result || (q.status === 'queued' ? 'added ' + localTime(q.added_at) : ''), 's'); });
+    cell(tr, q.source, 'path'); cell(tr, q.result || (q.status === 'queued' ? 'added ' + localTime(q.added_at) : ''), 's');
+    const td = cell(tr, '');
+    if (q.status === 'queued') { const b = document.createElement('button'); b.className = 'qbtn'; b.textContent = 'Remove';
+      b.onclick = async () => { const r = await (await fetch('/api/queue/' + q.id, {method:'DELETE'})).json(); qmsg(r); tick(); };
+      td.appendChild(b); } });
 
   const st = $('statuses'); head(st, [['Status'], ['Files','n'], ['Size','n']]);
   d.statuses.forEach(s => { const tr=row(st); cell(tr, LABEL[s.status]||s.status, 'st-'+s.status); cell(tr, num(s.files), 'n'); cell(tr, bytes(s.bytes), 'n'); });
@@ -308,41 +329,134 @@ async function tick() {
   try { render(await (await fetch('/api/status')).json()); }
   catch (e) { $('pill').textContent = 'status server unreachable'; $('pill').className = 'pill stale'; }
 }
+function qmsg(r) { const m = $('qmsg'); m.textContent = r.message || ''; m.className = r.ok ? 'ok' : 'err'; }
+let dirTimer = null, lastDirQuery = null;
+$('qpath').addEventListener('input', () => {
+  clearTimeout(dirTimer);
+  dirTimer = setTimeout(async () => {
+    const v = $('qpath').value.trim(); if (!v.startsWith('/')) return;
+    const base = v.endsWith('/') ? v : v.slice(0, v.lastIndexOf('/') + 1) || '/';
+    if (base === lastDirQuery) return; lastDirQuery = base;
+    const r = await (await fetch('/api/dirs?path=' + encodeURIComponent(base))).json();
+    $('qdirs').replaceChildren(...r.dirs.map(p => { const o = document.createElement('option'); o.value = p; return o; }));
+  }, 200);
+});
+$('qform').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const path = $('qpath').value.trim(); if (!path) return;
+  const r = await (await fetch('/api/queue', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({path})})).json();
+  qmsg(r); if (r.ok) $('qpath').value = ''; tick();
+});
 tick(); setInterval(tick, 2000);
 </script></body></html>
 """
 
 
-def make_handler(db_path):
+def _queue_dest(db_path):
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    try:
+        row = conn.execute("SELECT value FROM progress WHERE key = 'run'").fetchone()
+        return json.loads(row[0]).get('dest') if row else None
+    finally:
+        conn.close()
+
+
+def list_subdirs(path):
+    """Immediate subfolders of path (for the queue box's suggestions), skipping system/bundle folders."""
+    from photo_organizer.scanner import should_skip_dir
+    path = os.path.abspath(os.path.expanduser(path or '/Volumes'))
+    if not os.path.isdir(path):
+        path = os.path.dirname(path)
+    try:
+        names = sorted(e.name for e in os.scandir(path)
+                       if e.is_dir(follow_symlinks=False) and not e.name.startswith('.') and not should_skip_dir(e.name))
+    except OSError:
+        names = []
+    return {'path': path, 'dirs': [os.path.join(path, n) for n in names[:200]]}
+
+
+def make_handler(db_path, port):
+    local_hosts = {f'localhost:{port}', f'127.0.0.1:{port}', f'[::1]:{port}'}
+
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/':
-                body, ctype = PAGE.encode(), 'text/html; charset=utf-8'
-            elif self.path == '/archive':
-                body, ctype = ARCHIVE_PAGE.encode(), 'text/html; charset=utf-8'
-            elif self.path in ('/api/status', '/api/archive') or self.path.startswith('/api/archive/month'):
-                query = parse_qs(urlparse(self.path).query)
-                try:
-                    if self.path == '/api/status':
-                        data = snapshot(db_path)
-                    elif self.path == '/api/archive':
-                        data = archive_snapshot(db_path)
-                    else:
-                        data = month_detail(db_path, query.get('ym', [''])[0])
-                    body = json.dumps(data).encode()
-                except sqlite3.Error as e:
-                    self.send_error(503, f"catalog unavailable: {e}")
-                    return
-                ctype = 'application/json'
-            else:
-                self.send_error(404)
-                return
-            self.send_response(200)
+        def _send(self, code, body, ctype='application/json'):
+            if isinstance(body, (dict, list)):
+                body = json.dumps(body)
+            body = body.encode() if isinstance(body, str) else body
+            self.send_response(code)
             self.send_header('Content-Type', ctype)
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _trusted(self, write=False):
+            """Queue changes delete files, so only this page may make them: the Host must be this
+            server on localhost (blocks DNS rebinding), any Origin must match it, and writes must be
+            JSON (a cross-site page can't send that without a CORS preflight, which is never granted)."""
+            host = self.headers.get('Host', '')
+            origin = self.headers.get('Origin')
+            if host not in local_hosts or (origin and origin != f'http://{host}'):
+                return False
+            if write and not self.headers.get('Content-Type', '').startswith('application/json'):
+                return False
+            return True
+
+        def do_GET(self):
+            url = urlparse(self.path)
+            query = parse_qs(url.query)
+            if url.path == '/':
+                return self._send(200, PAGE, 'text/html; charset=utf-8')
+            if url.path == '/archive':
+                return self._send(200, ARCHIVE_PAGE, 'text/html; charset=utf-8')
+            if url.path == '/api/dirs':
+                if not self._trusted():
+                    return self.send_error(403)
+                return self._send(200, list_subdirs(query.get('path', [''])[0]))
+            try:
+                if url.path == '/api/status':
+                    return self._send(200, snapshot(db_path))
+                if url.path == '/api/archive':
+                    return self._send(200, archive_snapshot(db_path))
+                if url.path == '/api/archive/month':
+                    return self._send(200, month_detail(db_path, query.get('ym', [''])[0]))
+            except sqlite3.Error as e:
+                return self.send_error(503, f"catalog unavailable: {e}")
+            self.send_error(404)
+
+        def do_POST(self):
+            if urlparse(self.path).path != '/api/queue':
+                return self.send_error(404)
+            if not self._trusted(write=True):
+                return self.send_error(403)
+            try:
+                length = min(int(self.headers.get('Content-Length', 0)), 65536)
+                path = json.loads(self.rfile.read(length) or b'{}').get('path', '')
+            except (ValueError, AttributeError):
+                return self._send(400, {'ok': False, 'message': 'bad request'})
+            if not isinstance(path, str) or not path.strip():
+                return self._send(400, {'ok': False, 'message': 'enter a folder path'})
+            conn = init_db(db_path)
+            try:
+                queued, message = enqueue(conn, path, _queue_dest(db_path))
+            finally:
+                conn.close()
+            return self._send(200 if queued else 400, {'ok': bool(queued), 'message': message})
+
+        def do_DELETE(self):
+            parts = urlparse(self.path).path.rstrip('/').split('/')
+            if parts[:3] != ['', 'api', 'queue'] or len(parts) != 4 or not parts[3].isdigit():
+                return self.send_error(404)
+            if not self._trusted():
+                return self.send_error(403)
+            conn = init_db(db_path)
+            try:
+                n = conn.execute("DELETE FROM queue WHERE id = ? AND status = 'queued'", (int(parts[3]),)).rowcount
+                conn.commit()
+            finally:
+                conn.close()
+            return self._send(200 if n else 400, {'ok': bool(n), 'message': 'removed' if n else 'only queued items can be removed'})
 
         def log_message(self, *args):
             pass
@@ -361,7 +475,7 @@ def main():
     if not os.path.exists(args.db):
         raise SystemExit(f"Catalog not found: {args.db} (start photo-organizer first)")
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.db))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.db, args.port))
     url = f"http://{'localhost' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}/"
     print(f"Status page: {url}  (Ctrl-C to stop)")
     if not args.no_open:

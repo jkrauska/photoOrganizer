@@ -281,6 +281,59 @@ def test_archive_summary_counts_by_year_month_and_day(env, tmp_path):
     assert month_detail(db, "x' OR 1=1 --")['days'] == []
 
 
+def test_status_page_queue_endpoints_only_accept_same_origin_json(tmp_path):
+    import http.client
+    import json as _json
+    import threading
+    from http.server import ThreadingHTTPServer
+    from photo_organizer.db import init_db
+    from photo_organizer.status import make_handler
+    db = str(tmp_path / 'catalog.db')
+    init_db(db).close()
+    folder = tmp_path / 'dump'
+    folder.mkdir()
+    server = ThreadingHTTPServer(('127.0.0.1', 0), None)
+    port = server.server_address[1]
+    server.RequestHandlerClass = make_handler(db, port)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def req(method, path, body=None, headers=None):
+        c = http.client.HTTPConnection('127.0.0.1', port)
+        c.request(method, path, body=body, headers=headers or {})
+        r = c.getresponse()
+        return r.status, r.read()
+
+    ok_headers = {'Content-Type': 'application/json', 'Origin': f'http://127.0.0.1:{port}'}
+    body = _json.dumps({'path': str(folder)})
+    try:
+        assert req('POST', '/api/queue', body, {'Content-Type': 'application/x-www-form-urlencoded'})[0] == 403
+        assert req('POST', '/api/queue', body, {**ok_headers, 'Origin': 'http://evil.example'})[0] == 403
+        assert req('POST', '/api/queue', body, {**ok_headers, 'Host': 'evil.example:80'})[0] == 403
+        status, resp = req('POST', '/api/queue', body, ok_headers)
+        assert status == 200 and _json.loads(resp)['ok']
+        assert req('POST', '/api/queue', body, ok_headers)[0] == 400          # already queued
+        assert req('POST', '/api/queue', _json.dumps({'path': str(tmp_path / 'nope')}), ok_headers)[0] == 400
+        dirs = _json.loads(req('GET', f'/api/dirs?path={tmp_path}')[1])['dirs']
+        assert str(folder) in dirs
+        qid = init_db(db).execute("SELECT id FROM queue").fetchone()[0]
+        assert req('DELETE', f'/api/queue/{qid}', headers={'Origin': 'http://evil.example'})[0] == 403
+        assert req('DELETE', f'/api/queue/{qid}')[0] == 200
+        assert init_db(db).execute("SELECT COUNT(*) FROM queue").fetchone()[0] == 0
+    finally:
+        server.shutdown()
+
+
+def test_enqueue_rejects_folders_overlapping_the_store(tmp_path):
+    from photo_organizer.db import init_db
+    from photo_organizer.work_queue import enqueue
+    store = tmp_path / 'store'
+    (store / '2020').mkdir(parents=True)
+    conn = init_db(str(tmp_path / 'c.db'))
+    assert enqueue(conn, str(store / '2020'), str(store))[0] is None
+    assert enqueue(conn, str(tmp_path), str(store))[0] is None
+    assert enqueue(conn, str(store / '..' / 'store' / '2020'), str(store))[0] is None
+
+
 def test_copy_and_hash_never_overwrites(tmp_path):
     from photo_organizer.hashing import copy_and_hash
     (tmp_path / 'a').write_bytes(b'new')

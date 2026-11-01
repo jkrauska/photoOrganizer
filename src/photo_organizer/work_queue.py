@@ -21,6 +21,7 @@ import time
 from photo_organizer.cli import run
 from photo_organizer.dates import DEFAULT_EXIF_WORKERS, require_exiftool
 from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, init_db
+from photo_organizer.scanner import is_within
 from photo_organizer.state import DEFAULT_STOP_FILE, shutdown_requested, signal_handler
 
 IDLE_POLL_SECONDS = 5
@@ -38,21 +39,28 @@ def _pid_alive(pid):
         return False
 
 
-def add(conn, paths):
+def enqueue(conn, path, dest=None):
+    """Queue one folder. Returns (queued_path_or_None, message)."""
+    src = os.path.abspath(os.path.expanduser(path.strip())).rstrip('/') or '/'
+    if not os.path.isdir(src):
+        return None, f"not a folder: {src}"
+    if dest and (is_within(src, dest) or is_within(dest, src)):
+        return None, f"overlaps the store {dest}: {src}"
+    if conn.execute("SELECT 1 FROM queue WHERE source = ? AND status IN ('queued', 'running')",
+                    (src,)).fetchone():
+        return None, f"already queued: {src}"
+    conn.execute("INSERT INTO queue (source) VALUES (?)", (src,))
+    conn.commit()
+    return src, f"queued: {src}"
+
+
+def add(conn, paths, dest=None):
     added = []
     for p in paths:
-        src = os.path.abspath(os.path.expanduser(p)).rstrip('/')
-        if not os.path.isdir(src):
-            print(f"  skipped (not a folder): {src}")
-            continue
-        if conn.execute("SELECT 1 FROM queue WHERE source = ? AND status IN ('queued', 'running')",
-                        (src,)).fetchone():
-            print(f"  already queued: {src}")
-            continue
-        conn.execute("INSERT INTO queue (source) VALUES (?)", (src,))
-        added.append(src)
-        print(f"  queued: {src}")
-    conn.commit()
+        src, msg = enqueue(conn, p, dest)
+        print(f"  {msg}")
+        if src:
+            added.append(src)
     return added
 
 
@@ -111,9 +119,12 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
             _set_worker_state(conn, state='waiting: another run is active', next=item['source'])
             time.sleep(IDLE_POLL_SECONDS)
             continue
-        if not os.path.isdir(item['source']):
+        problem = ('folder not found' if not os.path.isdir(item['source'])
+                   else 'overlaps the store' if is_within(item['source'], dest) or is_within(dest, item['source'])
+                   else None)
+        if problem:
             conn.execute("UPDATE queue SET status = 'failed', finished_at = datetime('now'), result = ? "
-                          "WHERE id = ?", ('folder not found', item['id']))
+                         "WHERE id = ?", (problem, item['id']))
             conn.commit()
             continue
 
