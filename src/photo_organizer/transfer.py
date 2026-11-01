@@ -8,6 +8,7 @@ Anything that fails verification keeps its source and is marked 'error'.
 """
 
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -85,9 +86,43 @@ def retry_source_removal(conn, sources):
 COPY_ONLY = 'copy-only: source kept'
 
 
+class LocalFS:
+    """File operations through this Mac's mounts (SMB or local disk). NasFS mirrors this interface."""
+
+    verifies_copy = False   # the copy must still be read back from the destination storage
+    label = None
+
+    exists = staticmethod(os.path.exists)
+    getsize = staticmethod(os.path.getsize)
+    unlink = staticmethod(os.unlink)
+    remove_source = staticmethod(remove_source)
+
+    ismount = staticmethod(os.path.ismount)
+    rmdir = staticmethod(os.rmdir)
+    rmtree = staticmethod(shutil.rmtree)
+
+    @staticmethod
+    def entries(path):
+        """[(name, is_dir)] without following symlinks."""
+        return [(e.name, e.is_dir(follow_symlinks=False)) for e in os.scandir(path)]
+
+    @staticmethod
+    def sha256(path, nocache=False, progress=None):
+        return sha256_file(path, nocache=nocache, progress=progress)
+
+    @staticmethod
+    def copy_and_hash(src, dst, size, progress=None):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        return copy_and_hash(src, dst, progress=progress)
+
+    def close(self):
+        pass
+
+
 class TransferContext:
-    def __init__(self, conn, keep_sources=False):
+    def __init__(self, conn, keep_sources=False, fs=None):
         self.conn = conn
+        self.fs = fs or LocalFS()
         self.keep_sources = keep_sources
         self.large = {}             # fid -> live state of a >= LARGE_FILE transfer, for the status page
         self.large_lock = threading.Lock()
@@ -138,7 +173,7 @@ class TransferContext:
         with self.verify_lock:
             if path in self.verified:
                 return self.verified[path]
-        ok = os.path.exists(path) and sha256_file(path, nocache=True) == sha
+        ok = self.fs.exists(path) and self.fs.sha256(path, nocache=True) == sha
         with self.verify_lock:
             self.verified[path] = ok
         return ok
@@ -157,7 +192,7 @@ def _remove_duplicate(ctx, fid, src, src_hash, canonical):
             )
             ctx.conn.commit()
         return 'duplicate_kept', None
-    remove_source(src)
+    ctx.fs.remove_source(src)
     with ctx.db_lock:
         # Release the planned destination name so it isn't reserved by a file that was never copied.
         ctx.conn.execute(
@@ -183,7 +218,7 @@ def _claim_dest(ctx, fid, planned, src_hash):
             (candidate, fid),
         ).fetchone():
             continue
-        if os.path.exists(candidate) and (not src_hash or sha256_file(candidate, nocache=True) != src_hash):
+        if ctx.fs.exists(candidate) and (not src_hash or ctx.fs.sha256(candidate, nocache=True) != src_hash):
             continue  # stray file not from this catalog; never overwrite it
         return candidate
     raise RuntimeError(f"Too many collisions for {filename} in {dest_dir}")
@@ -198,25 +233,34 @@ def _could_be_duplicate(ctx, fid, size):
     ).fetchone() is not None
 
 
-def _copy_verify_delete(ctx, fid, src, dst, expected):
+def _copy_verify_delete(ctx, fid, src, dst, expected, size):
     """Copy src to dst (unless an identical dst already exists), verify from the NAS, delete src."""
-    phase = ctx.track(fid, src, os.path.getsize(src))
-    if os.path.exists(dst):
+    fs = ctx.fs
+    phase = ctx.track(fid, src, size)
+    copied = False
+    if fs.exists(dst):
         written = expected      # _claim_dest only hands back an existing file that matched expected
     else:
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
         try:
-            written = copy_and_hash(src, dst, progress=phase('copying'))
+            written = fs.copy_and_hash(src, dst, size, progress=phase('copying'))
+        except FileExistsError:
+            raise               # someone else's file appeared at dst: never remove it
         except BaseException:
-            if os.path.exists(dst):
-                os.unlink(dst)
+            try:
+                if fs.exists(dst):
+                    fs.unlink(dst)
+            except OSError:
+                pass            # recover_interrupted removes it on the next run
             raise
+        copied = True
         if expected and written != expected:
-            os.unlink(dst)
+            fs.unlink(dst)
             ctx.set_status(fid, 'error', expected, "source changed during copy; source kept")
             return 'error', f"source changed during copy: {src}"
-    if sha256_file(dst, nocache=True, progress=phase('verifying on NAS')) != written:
-        os.unlink(dst)
+    # NasFS.copy_and_hash already hashed the copy as stored on the NAS; anything else is read back.
+    if not (copied and fs.verifies_copy) and \
+            fs.sha256(dst, nocache=True, progress=phase('verifying on NAS')) != written:
+        fs.unlink(dst)
         ctx.set_status(fid, 'error', written, "copy read back from destination did not match; source kept")
         return 'error', f"destination verification failed: {dst}"
     ctx.set_status(fid, 'done', written, COPY_ONLY if ctx.keep_sources else None)
@@ -225,7 +269,7 @@ def _copy_verify_delete(ctx, fid, src, dst, expected):
     if ctx.keep_sources:
         return 'done', None
     try:
-        remove_source(src)
+        fs.remove_source(src)
     except OSError as e:
         # The copy is verified and stays 'done'; a later run retries the delete.
         ctx.set_status(fid, 'done', written, f"{SOURCE_KEPT}{e}")
@@ -235,20 +279,21 @@ def _copy_verify_delete(ctx, fid, src, dst, expected):
 
 def transfer_one(ctx, fid, src, planned):
     try:
-        if not os.path.exists(src):
+        if not ctx.fs.exists(src):
             ctx.set_status(fid, 'error', None, "source missing")
             return 'error', f"source missing: {src}"
+        size = ctx.fs.getsize(src)
 
         with ctx.db_lock:
-            fast = not _could_be_duplicate(ctx, fid, os.path.getsize(src))
+            fast = not _could_be_duplicate(ctx, fid, size)
             if fast:
                 dst = _claim_dest(ctx, fid, planned, None)
                 ctx.conn.execute("UPDATE files SET status = 'copying', dest_path = ? WHERE id = ?", (dst, fid))
                 ctx.conn.commit()
         if fast:
-            return _copy_verify_delete(ctx, fid, src, dst, None)
+            return _copy_verify_delete(ctx, fid, src, dst, None, size)
 
-        src_hash = sha256_file(src, progress=ctx.track(fid, src, os.path.getsize(src))('hashing source'))
+        src_hash = ctx.fs.sha256(src, progress=ctx.track(fid, src, size)('hashing source'))
         while True:
             with ctx.db_lock:
                 dup = ctx.conn.execute(
@@ -272,7 +317,7 @@ def transfer_one(ctx, fid, src, planned):
             break
 
         try:
-            return _copy_verify_delete(ctx, fid, src, dst, src_hash)
+            return _copy_verify_delete(ctx, fid, src, dst, src_hash, size)
         finally:
             with ctx.db_lock:
                 ctx.inflight.pop(src_hash).set()
@@ -284,7 +329,7 @@ def transfer_one(ctx, fid, src, planned):
         ctx.untrack(fid)
 
 
-def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=False):
+def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=False, fs=None):
     """Transfer the batch's planned files. Returns {status: count}."""
     placeholders = ','.join('?' * len(file_ids))
     rows = conn.execute(
@@ -298,12 +343,13 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=Fal
         print("  No files to transfer.")
         return counts
 
-    ctx = TransferContext(conn, keep_sources)
+    ctx = TransferContext(conn, keep_sources, fs)
     total = len(rows)
     total_bytes = sum(r['file_size'] or 0 for r in rows)
     bytes_done = completed = 0
     start = time.time()
-    set_progress(conn, ctx.db_lock, phase='transferring', batch_done=0, batch_total=total, large=[])
+    phase = f"transferring {ctx.fs.label}" if ctx.fs.label else 'transferring'
+    set_progress(conn, ctx.db_lock, phase=phase, batch_done=0, batch_total=total, large=[])
 
     # Big files can run for minutes without anything finishing; keep the status page live meanwhile.
     beat_stop = threading.Event()

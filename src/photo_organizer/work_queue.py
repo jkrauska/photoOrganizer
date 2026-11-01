@@ -188,6 +188,7 @@ def main():
     p_w.add_argument('--exif-workers', type=int, default=DEFAULT_EXIF_WORKERS)
     p_w.add_argument('--stop-file', default=DEFAULT_STOP_FILE)
     p_w.add_argument('--exit-when-empty', action='store_true')
+    p_w.add_argument('--no-nas', action='store_true', help='Always transfer through the Mac')
     args = parser.parse_args()
 
     conn = init_db(args.db)
@@ -207,7 +208,8 @@ def main():
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
         worker(conn, os.path.abspath(args.dest), args.db, args.stop_file, args.exit_when_empty,
-               batch_size=args.batch_size, workers=args.workers, exif_workers=args.exif_workers)
+               batch_size=args.batch_size, workers=args.workers, exif_workers=args.exif_workers,
+               nas=not args.no_nas)
     conn.close()
 
 

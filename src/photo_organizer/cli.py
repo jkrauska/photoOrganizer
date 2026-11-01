@@ -16,6 +16,7 @@ from photo_organizer.progress import finish_run, set_progress, start_run
 from photo_organizer.report import print_report
 from photo_organizer.scanner import PriorCatalogs, is_within, iter_source_files, scan_batch
 from photo_organizer.state import DEFAULT_STOP_FILE, configure_stop_file, shutdown_requested, signal_handler
+from photo_organizer.nas import detect as detect_nas
 from photo_organizer.transfer import execute_transfers, recover_interrupted, retry_source_removal
 
 
@@ -25,7 +26,7 @@ def ts():
 
 def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit=0,
         verbose=False, confirm=lambda prompt: True, exif_workers=DEFAULT_EXIF_WORKERS,
-        stop_file=DEFAULT_STOP_FILE, keep_sources=False):
+        stop_file=DEFAULT_STOP_FILE, keep_sources=False, nas=True):
     """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals,
     with 'stopped' set when a stop was requested. Raises RunLocked if another run holds the catalog."""
     # Backups are imported copy-only, whatever was asked.
@@ -35,6 +36,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
     conn = init_db(db_path)
     start_run(conn, sources, dest, execute)
     final_phase = 'stopped'
+    fs = None
     try:
         recovered = recover_interrupted(conn)
         if recovered:
@@ -43,6 +45,11 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
             removed, kept = retry_source_removal(conn, sources)
             if kept:
                 print(f"Removed {removed:,} of {kept:,} sources left behind by earlier failed deletes")
+
+        if execute and nas:
+            fs = detect_nas(sources, dest)
+            if fs:
+                print("Transfers run on the NAS: " + ', '.join(f"{a} = {b}" for a, b in fs.mapping))
 
         known = {r[0] for r in conn.execute("SELECT original_path FROM files")}
         file_iter = iter_source_files(sources, dest, known)
@@ -90,7 +97,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
                                f"({humanize.naturalsize(size)}){tail}? [y/N] "):
                     print("Aborted.")
                     break
-                counts = execute_transfers(conn, batch_ids, workers, verbose, keep_sources)
+                counts = execute_transfers(conn, batch_ids, workers, verbose, keep_sources, fs)
                 for k, v in counts.items():
                     totals[k] += v
                 if keep_sources:
@@ -108,7 +115,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         stopped = shutdown_requested()
         if execute and not stopped and not keep_sources:
             set_progress(conn, phase='pruning empty folders')
-            pruned = sum(prune_empty_dirs(s, verbose) for s in sources)
+            pruned = sum(prune_empty_dirs(s, verbose, fs) for s in sources)
             print(f"\nRemoved {pruned:,} emptied source folders")
         if stopped:
             print("\nStopped on request; rerun the same command to resume.")
@@ -121,6 +128,8 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         totals['keep_sources'] = keep_sources
         return totals
     finally:
+        if fs:
+            fs.close()
         try:
             finish_run(conn, final_phase)
         finally:
@@ -153,6 +162,8 @@ def main():
                         help=f'Create this file to stop gracefully (default: {DEFAULT_STOP_FILE})')
     parser.add_argument('--exif-workers', type=int, default=DEFAULT_EXIF_WORKERS,
                         help=f'Parallel exiftool processes for date reads (default: {DEFAULT_EXIF_WORKERS})')
+    parser.add_argument('--no-nas', action='store_true',
+                        help='Always transfer through the Mac, even between shares of one NAS')
     args = parser.parse_args()
 
     require_exiftool()
@@ -189,7 +200,8 @@ def main():
     start = time.time()
     try:
         run(sources, dest, args.db, args.execute, args.batch_size, args.workers, args.limit,
-            args.verbose, confirm, args.exif_workers, args.stop_file, args.keep_sources)
+            args.verbose, confirm, args.exif_workers, args.stop_file, args.keep_sources,
+            nas=not args.no_nas)
     except RunLocked as e:
         sys.exit(f"Error: {e}. Wait for it to finish, or add this folder to the queue (make queue SRC=...).")
     print(f"\nTotal time: {humanize.naturaldelta(time.time() - start)}")

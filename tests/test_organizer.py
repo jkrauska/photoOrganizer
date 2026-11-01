@@ -501,3 +501,80 @@ def test_prune_removes_folders_left_with_only_thumbnail_caches(tmp_path):
 
     assert not (root / '2006').exists()
     assert (keep / 'IMG_1.JPG').exists() and (keep / '@eaDir').exists()
+
+
+def local_nas(root):
+    """A NasFS whose helper runs here instead of over ssh, with the identity path mapping."""
+    import sys
+    from photo_organizer.nas import HELPER, NasFS
+    return NasFS('test-nas', [(str(root), str(root))], command=[sys.executable, '-u', '-c', HELPER])
+
+
+def test_nas_mode_moves_verifies_and_dedups_on_the_server(env, tmp_path, monkeypatch):
+    import photo_organizer.cli as cli
+    src, dest, go, rows = env
+    monkeypatch.setattr(cli, 'detect_nas', lambda sources, d: local_nas(tmp_path))
+    a = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:01:02 03:04:05")
+    os.utime(a, (1_600_000_000, 1_600_000_000))
+    shutil.copy2(a, f"{src}/b-IMG_1.jpg")
+    (src / 'a' / '.@__thumb').mkdir()
+    (src / 'a' / '.@__thumb' / 'IMG_1.jpg').write_bytes(b'thumb')
+    want = sha256_file(a)
+    go()
+    stored = files_under(dest)
+    assert len(stored) == 1 and stored[0].startswith('2020/01/2020-01-02/')
+    copy = dest / stored[0]
+    assert sha256_file(str(copy)) == want and copy.stat().st_mtime == 1_600_000_000
+    assert sorted(r['status'] for r in rows().values()) == ['done', 'duplicate_removed']
+    assert not src.exists()
+
+
+def test_nas_helper_refuses_unmapped_paths_and_mismatched_sizes(tmp_path):
+    fs = local_nas(tmp_path / 'share')
+    (tmp_path / 'share').mkdir()
+    f = tmp_path / 'share' / 'x.bin'
+    f.write_bytes(b'12345')
+    try:
+        with pytest.raises(ValueError):
+            fs.exists(str(tmp_path / 'elsewhere' / 'x.bin'))
+        with pytest.raises(OSError, match='catalog size'):
+            fs.copy_and_hash(str(f), str(tmp_path / 'share' / 'y.bin'), 4)
+        assert not (tmp_path / 'share' / 'y.bin').exists()
+        with pytest.raises(FileExistsError):
+            fs.copy_and_hash(str(f), str(f), 5)
+        assert f.read_bytes() == b'12345'
+    finally:
+        fs.close()
+
+
+def test_nas_detection_maps_shares_by_listing():
+    from photo_organizer import nas
+
+    class FakeFS:
+        def __init__(self, target, mapping):
+            self.target, self.mapping = target, mapping
+
+        def call(self, op, **kw):
+            return {'ping': {}, 'candidates': {
+                'photoArk': [['/mnt/Pool/photoArk', ['2018']], ['/mnt/Pool/old/photoArk', ['x']]],
+                'fileshares': [['/mnt/Pool/fileshares', ['photos']]]}.get(kw.get('share'))}[op] \
+                if op == 'candidates' else {}
+
+        def close(self):
+            pass
+
+    mounts = {'/Volumes/photoArk': ('me', 'nas.local', 'photoArk'),
+              '/Volumes/fileshares': ('me', 'nas.local', 'fileshares'),
+              '/Volumes/other': ('me', 'other.local', 'x')}
+    listings = {'/Volumes/photoArk': ['2018'], '/Volumes/fileshares': ['photos']}
+    orig = nas._visible_names
+    nas._visible_names = listings.__getitem__
+    try:
+        fs = nas.detect(['/Volumes/fileshares/photos/Raw'], '/Volumes/photoArk', mounts, FakeFS)
+        assert fs.target == 'me@nas.local'
+        assert fs.mapping == [('/Volumes/fileshares', '/mnt/Pool/fileshares'),
+                              ('/Volumes/photoArk', '/mnt/Pool/photoArk')]
+        assert nas.detect(['/Volumes/other/a'], '/Volumes/photoArk', mounts, FakeFS) is None
+        assert nas.detect(['/Users/me/Pictures'], '/Volumes/photoArk', mounts, FakeFS) is None
+    finally:
+        nas._visible_names = orig

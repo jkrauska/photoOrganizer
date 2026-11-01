@@ -292,7 +292,7 @@ function render(d) {
   $('eta').textContent = r.alive ? dur(d.eta_seconds) : (r.finished ? 'done' : '–');
   $('pend').textContent = `${num(d.pending.files)} pending · ${bytes(d.pending.bytes)}`;
   $('batch').textContent = r.batch ?? '–';
-  const bt = r.batch_total || 0, bd = r.batch_done || 0, moving = r.alive && r.phase === 'transferring';
+  const bt = r.batch_total || 0, bd = r.batch_done || 0, moving = r.alive && (r.phase || '').startsWith('transferring');
   $('batchs').textContent = !r.alive ? (r.finished_at ? `ended ${localTime(r.finished_at)}` : '')
     : moving ? `${num(bd)} / ${num(bt)} files`
     : r.phase === 'reading dates' && r.dates_total ? `dates ${num(r.dates_read || 0)} / ${num(r.dates_total)}`
