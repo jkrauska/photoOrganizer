@@ -25,6 +25,28 @@ def _pid_alive(pid):
         return False
 
 
+def _rel(path, root):
+    if path and root and path.startswith(root.rstrip('/') + '/'):
+        return path[len(root.rstrip('/')) + 1:]
+    return path
+
+
+def _activity(row, dest_root):
+    """One recent-activity line: where the file came from and where it ended up (or why it stayed)."""
+    status, msg = row['status'], row['error_message'] or ''
+    target = row['dest_path']
+    if status == 'duplicate_removed' and msg.startswith('duplicate of '):
+        target = msg[len('duplicate of '):].split('; source removed')[0]
+    return {
+        'updated_at': row['updated_at'],
+        'status': status,
+        'source_root': row['source_root'],
+        'source': _rel(row['original_path'], row['source_root']),
+        'dest': _rel(target, dest_root) if status in ('done', 'duplicate_removed', 'copying') else None,
+        'note': msg if status in ('review', 'ignored', 'error') else None,
+    }
+
+
 def snapshot(db_path):
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
@@ -92,9 +114,9 @@ def snapshot(db_path):
             f"COALESCE(SUM(file_size), 0) AS bytes FROM files WHERE status IN {MOVED} "
             f"AND updated_at >= strftime('%Y-%m-%dT%H:%M', 'now', '-60 minutes') "
             f"GROUP BY minute ORDER BY minute")]
-        recent = [dict(r) for r in conn.execute(
-            "SELECT original_path, dest_path, status, updated_at FROM files "
-            "WHERE updated_at IS NOT NULL ORDER BY updated_at DESC LIMIT 15")]
+        recent = [_activity(dict(r), run.get('dest')) for r in conn.execute(
+            "SELECT original_path, source_root, dest_path, status, error_message, updated_at FROM files "
+            "WHERE updated_at IS NOT NULL ORDER BY updated_at DESC LIMIT 25")]
         errors = [dict(r) for r in conn.execute(
             "SELECT original_path, error_message, updated_at FROM files WHERE status = 'error' "
             "ORDER BY updated_at DESC LIMIT 15")]
@@ -139,6 +161,8 @@ td, th { text-align:left; padding:5px 6px; border-top:1px solid var(--line); ver
 th { color:var(--muted); font-weight:500; border-top:none; }
 td.n, th.n { text-align:right; }
 .path { font-family:ui-monospace, Menlo, monospace; font-size:12px; word-break:break-all; }
+.path .to { color:var(--accent); margin-top:2px; }
+.path .to.st-review, .path .to.st-ignored { color:var(--warn); } .path .to.st-error { color:var(--bad); }
 .st-error { color:var(--bad); } .st-review, .st-ignored { color:var(--warn); } .st-done, .st-duplicate_removed { color:var(--accent); }
 .progress { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:8px; }
 .progress > div { height:100%; background:var(--bar); }
@@ -230,9 +254,15 @@ function render(d) {
     cell(tr, src, 'path'); cell(tr, num((c.done||0)+(c.duplicate_removed||0)), 'n'); cell(tr, num(c.pending||0), 'n');
     cell(tr, num((c.review||0)+(c.ignored||0)+(c.error||0)), 'n'); });
 
-  const re = $('recent'); head(re, [['When'], ['Status'], ['File']]);
+  const re = $('recent'); head(re, [['When'], ['Status'], ['From → To']]);
   d.recent.forEach(x => { const tr=row(re); cell(tr, (x.updated_at||'').slice(11,19)+'Z', 's');
-    cell(tr, LABEL[x.status]||x.status, 'st-'+x.status); cell(tr, x.original_path, 'path'); });
+    cell(tr, LABEL[x.status]||x.status, 'st-'+x.status);
+    const td = cell(tr, '', 'path');
+    const from = document.createElement('div'); from.textContent = x.source; from.title = (x.source_root||'') + '/' + x.source;
+    const to = document.createElement('div'); to.className = 'to';
+    if (x.dest) { to.textContent = '→ ' + x.dest; to.title = (d.run.dest||'') + '/' + x.dest; }
+    else if (x.note) { to.textContent = '⏸ ' + x.note; to.classList.add('st-' + x.status); }
+    td.replaceChildren(from, to); });
 
   const er = $('errors'); head(er, [['File'], ['Error']]);
   if (!d.errors.length) { const tr=row(er); cell(tr, 'None', 'muted'); cell(tr, ''); }
