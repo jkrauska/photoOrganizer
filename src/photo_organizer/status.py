@@ -12,6 +12,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Timer
 
+from urllib.parse import parse_qs, urlparse
+
+from photo_organizer.archive import PAGE as ARCHIVE_PAGE, archive_snapshot, month_detail
 from photo_organizer.db import DEFAULT_DB_PATH
 
 MOVED = "('done', 'duplicate_removed')"
@@ -184,7 +187,7 @@ svg { width:100%; height:90px; display:block; }
 .activity { display:grid; grid-template-columns:1fr; gap:12px; }
 @media (min-width:1600px) { .activity { grid-template-columns:3fr 2fr; align-items:start; } }
 </style></head><body><main>
-<header><h1>Photo Organizer</h1><span id="pill" class="pill">loading</span><span id="phase" class="muted"></span></header>
+<header><h1>Photo Organizer</h1><nav><a href="/" style="color:var(--fg);font-weight:600;text-decoration:none;margin-right:12px">Status</a><a href="/archive" style="color:var(--muted);text-decoration:none">Archive</a></nav><span id="pill" class="pill">loading</span><span id="phase" class="muted"></span></header>
 <div class="grid">
   <div class="card"><div class="k">Images / s</div><div class="v" id="fps">–</div><div class="s" id="fps2"></div></div>
   <div class="card"><div class="k">Throughput</div><div class="v" id="mbps">–</div><div class="s" id="mbps2"></div></div>
@@ -315,9 +318,18 @@ def make_handler(db_path):
         def do_GET(self):
             if self.path == '/':
                 body, ctype = PAGE.encode(), 'text/html; charset=utf-8'
-            elif self.path == '/api/status':
+            elif self.path == '/archive':
+                body, ctype = ARCHIVE_PAGE.encode(), 'text/html; charset=utf-8'
+            elif self.path in ('/api/status', '/api/archive') or self.path.startswith('/api/archive/month'):
+                query = parse_qs(urlparse(self.path).query)
                 try:
-                    body = json.dumps(snapshot(db_path)).encode()
+                    if self.path == '/api/status':
+                        data = snapshot(db_path)
+                    elif self.path == '/api/archive':
+                        data = archive_snapshot(db_path)
+                    else:
+                        data = month_detail(db_path, query.get('ym', [''])[0])
+                    body = json.dumps(data).encode()
                 except sqlite3.Error as e:
                     self.send_error(503, f"catalog unavailable: {e}")
                     return

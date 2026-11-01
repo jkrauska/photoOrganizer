@@ -264,6 +264,23 @@ def test_second_run_is_refused_while_one_holds_the_catalog(env, tmp_path):
         os.close(held)
 
 
+def test_archive_summary_counts_by_year_month_and_day(env, tmp_path):
+    from photo_organizer.archive import archive_snapshot, month_detail
+    src, dest, go, _ = env
+    make_jpeg(f"{src}/a/IMG_1.jpg", "2019:03:02 10:00:00", (1, 1, 1))
+    make_jpeg(f"{src}/a/IMG_2.jpg", "2019:03:02 11:00:00", (2, 2, 2))
+    make_jpeg(f"{src}/b/IMG_3.jpg", "2020:12:25 09:00:00", (3, 3, 3))
+    go()
+    db = str(tmp_path / 'local' / 'catalog.db')
+    snap = archive_snapshot(db)
+    assert snap['total']['files'] == 3 and snap['total']['photo'] == 3
+    assert [(y['year'], y['files']) for y in snap['years']] == [('2019', 2), ('2020', 1)]
+    assert set(snap['months']) == {'2019-03', '2020-12'}
+    days = month_detail(db, '2019-03')['days']
+    assert [(d['day'], d['files']) for d in days] == [('2019-03-02', 2)]
+    assert month_detail(db, "x' OR 1=1 --")['days'] == []
+
+
 def test_copy_and_hash_never_overwrites(tmp_path):
     from photo_organizer.hashing import copy_and_hash
     (tmp_path / 'a').write_bytes(b'new')
