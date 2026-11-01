@@ -6,8 +6,10 @@ description = "Sort photos into YEAR/MONTH/YYYY-MM-DD with SQLite tracking, plus
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "humanize>=4.15.0",
-    "Pillow>=10.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8", "Pillow>=10.0"]
 
 [project.optional-dependencies]
 analysis = [
@@ -28,6 +30,7 @@ analysis = [
 
 [project.scripts]
 photo-organizer = "photo_organizer.cli:main"
+photo-organizer-status = "photo_organizer.status:main"
 photo-analyze = "photo_organizer.analysis.analyze:main"
 photo-cluster-faces = "photo_organizer.analysis.cluster:main"
 photo-enrich = "photo_organizer.analysis.enrich:main"

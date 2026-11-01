@@ -7,151 +7,149 @@ import time
 
 import humanize
 
-from photo_organizer.constants import DEFAULT_DEST, DEFAULT_SOURCE
-from photo_organizer.dates import HAS_PILLOW
-from photo_organizer.db import init_db
+from photo_organizer.cleanup import prune_empty_dirs
+from photo_organizer.dates import require_exiftool
+from photo_organizer.db import DEFAULT_DB_PATH, backup_db, init_db
 from photo_organizer.planner import plan_destinations
+from photo_organizer.progress import finish_run, set_progress, start_run
 from photo_organizer.report import print_report
-from photo_organizer.scanner import scan_source
+from photo_organizer.scanner import PriorCatalogs, is_within, iter_source_files, scan_batch
 from photo_organizer.state import shutdown_requested, signal_handler
-from photo_organizer.transfer import execute_transfers
+from photo_organizer.transfer import execute_transfers, recover_interrupted
+
+
+def ts():
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit=0,
+        verbose=False, confirm=lambda prompt: True):
+    """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals."""
+    conn = init_db(db_path)
+    start_run(conn, sources, dest, execute)
+    final_phase = 'stopped'
+    try:
+        recovered = recover_interrupted(conn)
+        if recovered:
+            print(f"Recovered {recovered:,} files interrupted mid-transfer")
+
+        known = {r[0] for r in conn.execute("SELECT original_path FROM files")}
+        file_iter = iter_source_files(sources, dest, known)
+        prior = PriorCatalogs()
+        totals = {'done': 0, 'duplicate_removed': 0, 'error': 0, 'review': 0}
+        processed = 0
+        batch_num = 0
+
+        while not shutdown_requested():
+            batch_num += 1
+            set_progress(conn, batch=batch_num)
+            want = min(batch_size, limit - processed) if limit else batch_size
+            if limit and want <= 0:
+                break
+
+            pending = conn.execute(
+                "SELECT id FROM files WHERE status = 'pending' LIMIT ?", (want,)
+            ).fetchall() if execute else []
+            if pending:
+                batch_ids = [r['id'] for r in pending]
+                print(f"\n--- Batch {batch_num} ({len(batch_ids):,} pending from earlier) ---")
+                exhausted = False
+            else:
+                print(f"\n[{ts()}] --- Batch {batch_num}: scanning ---")
+                batch_ids, exhausted = scan_batch(file_iter, conn, known, prior, want, verbose)
+                if not batch_ids:
+                    break
+
+            _, review = plan_destinations(conn, dest, batch_ids, verbose)
+            totals['review'] += review
+            processed += len(batch_ids)
+
+            if execute:
+                size = conn.execute(
+                    f"SELECT SUM(file_size) FROM files WHERE status = 'pending' AND dest_path IS NOT NULL "
+                    f"AND id IN ({','.join('?' * len(batch_ids))})", batch_ids,
+                ).fetchone()[0] or 0
+                set_progress(conn, phase='waiting for confirmation')
+                if not confirm(f"\n[{ts()}] Move {len(batch_ids) - review:,} files "
+                               f"({humanize.naturalsize(size)}) and delete sources? [y/N] "):
+                    print("Aborted.")
+                    break
+                counts = execute_transfers(conn, batch_ids, workers, verbose)
+                for k, v in counts.items():
+                    totals[k] += v
+                print(f"  Batch {batch_num}: {counts['done']:,} moved | "
+                      f"{counts['duplicate_removed']:,} duplicates removed | {counts['error']:,} errors")
+                backup_db(conn, dest)
+
+            if exhausted:
+                break
+
+        if execute:
+            set_progress(conn, phase='pruning empty folders')
+            pruned = sum(prune_empty_dirs(s, verbose) for s in sources)
+            print(f"\nRemoved {pruned:,} emptied source folders")
+        if not shutdown_requested():
+            final_phase = 'finished'
+        if execute:
+            print(f"Catalog backed up to {backup_db(conn, dest)}")
+        print_report(conn, dry_run=not execute)
+        return totals
+    finally:
+        try:
+            finish_run(conn, final_phase)
+        finally:
+            conn.close()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Photo Organizer - Sort and move photos into YEAR/MONTH/YYYY-MM-DD structure."
+        description="File photos from ad-hoc folders into DEST/YYYY/MM/YYYY-MM-DD/, deleting each "
+                    "source only after its copy in DEST is verified. Files without a reliable date, "
+                    "unhandled types, and errors are left where they are."
     )
+    parser.add_argument('--source', action='append', required=True,
+                        help='Source directory to empty into the store (repeatable)')
+    parser.add_argument('--dest', required=True, help='Canonical store root (the fresh mount)')
+    parser.add_argument('--db', default=DEFAULT_DB_PATH,
+                        help=f'Catalog path on local disk (default: {DEFAULT_DB_PATH})')
     parser.add_argument('--execute', action='store_true',
-                        help='Actually move files (default is dry-run)')
-    parser.add_argument('--source', default=DEFAULT_SOURCE,
-                        help=f'Source directory (default: {DEFAULT_SOURCE})')
-    parser.add_argument('--dest', default=DEFAULT_DEST,
-                        help=f'Destination directory (default: {DEFAULT_DEST})')
-    parser.add_argument('--db', default=None,
-                        help='SQLite database path (default: <dest>/photo_organizer.db)')
-    parser.add_argument('--verbose', '-v', action='store_true',
-                        help='Show detailed progress')
-    parser.add_argument('--resume', action='store_true',
-                        help='Resume from previous run')
-    parser.add_argument('--limit', type=int, default=0,
-                        help='Limit total number of files to process (0 = no limit)')
-    parser.add_argument('--batch-size', type=int, default=5000,
-                        help='Files per batch (scan, plan, transfer in chunks; default: 5000)')
-    parser.add_argument('--workers', type=int, default=4,
-                        help='Number of parallel transfer threads (default: 4)')
-
+                        help='Actually move files and delete sources (default is dry-run)')
+    parser.add_argument('--yes', action='store_true', help='Skip confirmation prompts')
+    parser.add_argument('--verbose', '-v', action='store_true')
+    parser.add_argument('--limit', type=int, default=0, help='Process at most N files (0 = no limit)')
+    parser.add_argument('--batch-size', type=int, default=5000)
+    parser.add_argument('--workers', type=int, default=4)
     args = parser.parse_args()
 
-    # Validate paths
-    if not os.path.isdir(args.source):
-        print(f"Error: Source directory not found: {args.source}")
-        sys.exit(1)
-    if not os.path.isdir(args.dest):
-        print(f"Error: Destination directory not found: {args.dest}")
-        sys.exit(1)
+    require_exiftool()
+    for d in args.source + [args.dest]:
+        if not os.path.isdir(d):
+            sys.exit(f"Error: directory not found: {d}")
+    sources = [os.path.abspath(s) for s in args.source]
+    dest = os.path.abspath(args.dest)
+    for s in sources:
+        if is_within(s, dest):
+            sys.exit(f"Error: source {s} is inside the destination")
+    if any(is_within(os.path.abspath(args.db), s) for s in sources):
+        sys.exit("Error: the catalog must not live inside a source directory")
 
-    db_path = args.db or os.path.join(args.dest, 'photo_organizer.db')
-
-    mode = "EXECUTE" if args.execute else "DRY RUN"
-    print(f"Photo Organizer [{mode}]")
-    print(f"  Source: {args.source}")
-    print(f"  Dest:   {args.dest}")
-    print(f"  DB:     {db_path}")
-    if args.limit:
-        print(f"  Limit:  {args.limit} files")
-    print(f"  Batch:  {args.batch_size} files per batch")
-    print(f"  Workers: {args.workers} threads")
-    if not HAS_PILLOW:
-        print("  Warning: Pillow not installed. JPG EXIF extraction disabled.")
+    print(f"Photo Organizer [{'EXECUTE: sources are DELETED after verified copy' if args.execute else 'DRY RUN'}]")
+    for s in sources:
+        print(f"  Source: {s}")
+    print(f"  Dest:   {dest}")
+    print(f"  DB:     {args.db}")
+    print(f"  Batch:  {args.batch_size} files, {args.workers} workers"
+          + (f", limit {args.limit}" if args.limit else ""))
     print()
 
-    answer = input("Confirm settings are correct to continue? [y/N] ")
-    if answer.strip().lower() not in ('y', 'yes'):
-        print("Aborted.")
-        sys.exit(0)
-    print()
+    def confirm(prompt):
+        return args.yes or input(prompt).strip().lower() in ('y', 'yes')
 
-    conn = init_db(db_path)
+    if not confirm("Confirm settings are correct to continue? [y/N] "):
+        sys.exit("Aborted.")
 
-    # Install graceful shutdown handler now that we're past prompts
     signal.signal(signal.SIGINT, signal_handler)
-
-    def ts():
-        return datetime.datetime.now().strftime("%H:%M:%S")
-
-    def timed(label):
-        """Context manager that prints step with elapsed time."""
-        class Timer:
-            def __enter__(self):
-                self.start = time.time()
-                print(f"[{ts()}] {label}...")
-                return self
-            def __exit__(self, *args):
-                elapsed = time.time() - self.start
-                print(f"[{ts()}] {label} done ({elapsed:.1f}s)")
-        return Timer()
-
-    batch_num = 0
-    total_done = 0
-    total_errors = 0
-    total_duplicates = 0
-    files_remaining = args.limit if args.limit else float('inf')
-    run_start = time.time()
-
-    while not shutdown_requested():
-        batch_num += 1
-        batch_limit = min(args.batch_size, int(files_remaining)) if args.limit else args.batch_size
-
-        # Phase 1: Check for existing pending files first, scan only if none
-        pending_rows = conn.execute(
-            "SELECT id FROM files WHERE status = 'pending' LIMIT ?", (batch_limit,)
-        ).fetchall()
-
-        if pending_rows:
-            batch_ids = [r['id'] for r in pending_rows]
-            print(f"\n--- Batch {batch_num} ({len(batch_ids):,} pending in DB) ---")
-        else:
-            # No pending files — scan for new ones
-            print(f"\n--- Batch {batch_num} (scanning up to {batch_limit:,} new files) ---")
-            with timed("Scanning"):
-                scanned, batch_ids = scan_source(args.source, conn, verbose=args.verbose, limit=batch_limit)
-            if scanned == 0:
-                print("No more files to scan.")
-                break
-
-        # Phase 2: Plan destinations for this batch only
-        with timed("Planning"):
-            plan_destinations(conn, args.dest, args.source, verbose=args.verbose, file_ids=batch_ids)
-
-        # Phase 3: Execute this batch only
-        if args.execute:
-            total_size = conn.execute(
-                f"SELECT SUM(file_size) as s FROM files WHERE status = 'pending' AND id IN ({','.join('?' * len(batch_ids))})",
-                batch_ids
-            ).fetchone()['s'] or 0
-            answer = input(f"\n[{ts()}] Ready to move {len(batch_ids):,} files ({humanize.naturalsize(total_size)}). Proceed? [y/N] ")
-            if answer.strip().lower() not in ('y', 'yes'):
-                print("Aborted.")
-                break
-            with timed("Transferring"):
-                done, errors, duplicates = execute_transfers(conn, verbose=args.verbose, file_ids=batch_ids, workers=args.workers)
-            total_done += done
-            total_errors += errors
-            total_duplicates += duplicates
-            print(f"  Batch {batch_num}: {done:,} done | {errors:,} errors | {duplicates:,} duplicates")
-        else:
-            print(f"[{ts()}] Skipped transfer (dry-run mode)")
-
-        if args.limit:
-            files_remaining -= len(batch_ids)
-            if files_remaining <= 0:
-                break
-
-    # Final report
-    total_elapsed = time.time() - run_start
-    if args.execute and batch_num > 1:
-        print(f"\n  TOTAL: {total_done:,} done | {total_errors:,} errors | {total_duplicates:,} duplicates")
-    print_report(conn, dry_run=not args.execute)
-    print(f"\nTotal time: {humanize.naturaldelta(total_elapsed)}")
-
-    conn.close()
+    start = time.time()
+    run(sources, dest, args.db, args.execute, args.batch_size, args.workers, args.limit,
+        args.verbose, confirm)
+    print(f"\nTotal time: {humanize.naturaldelta(time.time() - start)}")

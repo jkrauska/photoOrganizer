@@ -1,137 +1,78 @@
-"""Compute destination paths for pending files, handling collisions and ARW+XMP pairing."""
+"""Compute destination paths: DEST/YYYY/MM/YYYY-MM-DD/<original filename>."""
 
-import datetime
 import os
+from collections import defaultdict
 
-from photo_organizer.dates import (
-    _parse_exif_datetime,
-    extract_date_from_dirpath,
-    extract_date_from_filename,
-)
+from photo_organizer.constants import RAW_EXTENSIONS, TRUSTED_DATE_SOURCES
+from photo_organizer.db import NOW_SQL
 
-
-def compute_dest_dir(dt, dest_root):
-    """Compute destination directory from a date: DEST/YYYY/MM/YYYY-MM-DD/"""
-    if dt is None:
-        return os.path.join(dest_root, 'UNKNOWN_DATE')
-    return os.path.join(
-        dest_root,
-        f"{dt.year:04d}",
-        f"{dt.month:02d}",
-        f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
-    )
+SOURCE_RANK = {s: i for i, s in enumerate(TRUSTED_DATE_SOURCES)}
 
 
-def resolve_dest_path(dest_dir, filename, conn):
-    """Resolve the full destination path, handling filename collisions.
-    Uses DB only (no filesystem checks) to avoid network round-trips."""
-    dest_path = os.path.join(dest_dir, filename)
+def compute_dest_dir(day, dest_root):
+    """day is 'YYYY-MM-DD'."""
+    return os.path.join(dest_root, day[:4], day[5:7], day[:10])
 
-    existing = conn.execute(
-        "SELECT id FROM files WHERE dest_path = ?", (dest_path,)
-    ).fetchone()
-    if not existing:
-        return dest_path
 
-    # Add numeric suffix
+def resolve_dest_path(dest_dir, filename, conn, own_id):
+    """Pick a destination path no other catalog row claims, adding _1, _2... on collision."""
     stem, ext = os.path.splitext(filename)
-    for i in range(1, 10000):
-        candidate = os.path.join(dest_dir, f"{stem}_{i}{ext}")
-        existing = conn.execute(
-            "SELECT id FROM files WHERE dest_path = ?", (candidate,)
+    for i in range(10000):
+        candidate = os.path.join(dest_dir, filename if i == 0 else f"{stem}_{i}{ext}")
+        taken = conn.execute(
+            "SELECT 1 FROM files WHERE dest_path = ? AND id != ?", (candidate, own_id)
         ).fetchone()
-        if not existing:
+        if not taken:
             return candidate
-
     raise RuntimeError(f"Too many collisions for {filename} in {dest_dir}")
 
 
-def plan_destinations(conn, dest_root, source_root, verbose=False, file_ids=None):
-    """Compute destination paths for pending files. If file_ids given, only plan those."""
-    query = ("SELECT id, filename, original_path, date_source, exif_creation_date, "
-             "file_modified_date, group_key FROM files WHERE status = 'pending' AND dest_path IS NULL ")
-    if file_ids:
-        placeholders = ','.join('?' * len(file_ids))
-        query += f"AND id IN ({placeholders}) "
-        query += "ORDER BY group_key, filename"
-        rows = conn.execute(query, file_ids).fetchall()
-    else:
-        query += "ORDER BY group_key, filename"
-        rows = conn.execute(query).fetchall()
+def _best_day(members):
+    """Most trustworthy capture day in a group, preferring RAW EXIF; None if nothing is trusted."""
+    trusted = [m for m in members if m['date_source'] in SOURCE_RANK and m['taken_at']]
+    if not trusted:
+        return None
+    trusted.sort(key=lambda m: (
+        SOURCE_RANK[m['date_source']],
+        os.path.splitext(m['filename'])[1].lower() not in RAW_EXTENSIONS,
+    ))
+    return trusted[0]['taken_at'][:10]
 
-    # Group by group_key to handle ARW+XMP pairs
-    groups = {}
+
+def plan_destinations(conn, dest_root, file_ids, verbose=False):
+    """Plan destinations for pending files in file_ids; groups with no trusted date go to 'review'.
+    Returns (planned, review)."""
+    placeholders = ','.join('?' * len(file_ids))
+    rows = conn.execute(
+        f"SELECT id, filename, date_source, taken_at, group_key FROM files "
+        f"WHERE status = 'pending' AND dest_path IS NULL AND id IN ({placeholders}) "
+        f"ORDER BY group_key, filename",
+        file_ids,
+    ).fetchall()
+
+    groups = defaultdict(list)
     for row in rows:
-        key = row['group_key']
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(dict(row))
+        groups[row['group_key']].append(row)
 
-    planned = 0
-    total_to_plan = sum(len(m) for m in groups.values())
-    for key, members in groups.items():
-        # Find the best date from the group using DB data (no file I/O)
-        best_date = None
-
-        # Prefer ARW's EXIF date
-        for m in members:
-            ext = os.path.splitext(m['filename'])[1].lower()
-            if ext == '.arw' and m['date_source'] == 'exif' and m['exif_creation_date']:
-                best_date = _parse_exif_datetime(m['exif_creation_date'])
-                break
-
-        # Fall back to any member with an exif date
-        if best_date is None:
-            for m in members:
-                if m['exif_creation_date']:
-                    best_date = _parse_exif_datetime(m['exif_creation_date'])
-                    if best_date:
-                        break
-
-        # Fall back to filename/dirname parsing (no file I/O needed)
-        if best_date is None:
-            for m in members:
-                best_date = extract_date_from_filename(m['filename'])
-                if best_date:
-                    break
-
-        if best_date is None:
-            for m in members:
-                best_date = extract_date_from_dirpath(m['original_path'], source_root)
-                if best_date:
-                    break
-
-        # Last resort: file mtime from DB
-        if best_date is None:
-            for m in members:
-                if m['file_modified_date']:
-                    try:
-                        best_date = datetime.date.fromisoformat(m['file_modified_date'][:10])
-                    except (ValueError, TypeError):
-                        pass
-                    if best_date:
-                        break
-
-        dest_dir = compute_dest_dir(best_date, dest_root)
-
-        for m in members:
-            dest_path = resolve_dest_path(dest_dir, m['filename'], conn)
-            conn.execute(
-                "UPDATE files SET dest_path = ? WHERE id = ?",
-                (dest_path, m['id'])
+    planned = review = 0
+    for members in groups.values():
+        day = _best_day(members)
+        if day is None:
+            conn.executemany(
+                f"UPDATE files SET status = 'review', error_message = ?, updated_at = {NOW_SQL} WHERE id = ?",
+                [("no reliable capture date (only file mtime)", m['id']) for m in members],
             )
+            review += len(members)
+            continue
+
+        dest_dir = compute_dest_dir(day, dest_root)
+        for m in members:
+            dest_path = resolve_dest_path(dest_dir, m['filename'], conn, m['id'])
+            conn.execute("UPDATE files SET dest_path = ? WHERE id = ?", (dest_path, m['id']))
             planned += 1
-
             if verbose:
-                rel_dest = os.path.relpath(dest_path, dest_root)
-                print(f"  {m['filename']} -> {rel_dest} ({m['date_source']})")
-
-        if planned % 500 == 0:
-            conn.commit()
-            if total_to_plan > 0:
-                pct = planned * 100 // total_to_plan
-                print(f"\r  Planning {planned:,}/{total_to_plan:,} ({pct}%)...", end='', flush=True)
+                print(f"  {m['filename']} -> {os.path.relpath(dest_path, dest_root)} ({m['date_source']})")
 
     conn.commit()
-    print(f"\r  Planned destinations for {planned:,} files          ")
-    return planned
+    print(f"  Planned {planned:,} files; {review:,} left in place for review (no reliable date)")
+    return planned, review
