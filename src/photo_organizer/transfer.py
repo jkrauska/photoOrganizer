@@ -17,7 +17,7 @@ import humanize
 
 from photo_organizer.constants import is_time_machine_path
 from photo_organizer.db import NOW_SQL
-from photo_organizer.hashing import copy_and_hash, sha256_file
+from photo_organizer.hashing import LARGE_FILE, copy_and_hash, sha256_file
 from photo_organizer.progress import set_progress
 from photo_organizer.state import shutdown_requested
 
@@ -89,6 +89,9 @@ class TransferContext:
     def __init__(self, conn, keep_sources=False):
         self.conn = conn
         self.keep_sources = keep_sources
+        self.large = {}             # fid -> live state of a >= LARGE_FILE transfer, for the status page
+        self.large_lock = threading.Lock()
+        self.completed = 0
         self.db_lock = threading.Lock()
         self.inflight = {}          # sha256 -> Event set when that content's first copy finishes
         self.verified = {}          # canonical dest_path -> bool (NAS re-read result this run)
@@ -102,6 +105,34 @@ class TransferContext:
                 (status, sha, message, dest_path, fid),
             )
             self.conn.commit()
+
+    def track(self, fid, src, size):
+        """Progress callback factory for a large file: phase -> callback(bytes_done)."""
+        if size < LARGE_FILE:
+            return lambda phase: None
+
+        def phase_cb(phase):
+            with self.large_lock:
+                self.large[fid] = {'name': os.path.basename(src), 'source': src, 'size': size,
+                                   'phase': phase, 'done': 0, 'started': time.time()}
+
+            def cb(done):
+                self.large[fid]['done'] = done
+            return cb
+        return phase_cb
+
+    def untrack(self, fid):
+        with self.large_lock:
+            self.large.pop(fid, None)
+
+    def large_snapshot(self):
+        now = time.time()
+        with self.large_lock:
+            items = [dict(v) for v in self.large.values()]
+        for v in items:
+            elapsed = max(now - v.pop('started'), 0.001)
+            v['bytes_per_s'] = v['done'] / elapsed
+        return sorted(items, key=lambda v: v['name'])
 
     def canonical_ok(self, path, sha):
         with self.verify_lock:
@@ -169,12 +200,13 @@ def _could_be_duplicate(ctx, fid, size):
 
 def _copy_verify_delete(ctx, fid, src, dst, expected):
     """Copy src to dst (unless an identical dst already exists), verify from the NAS, delete src."""
+    phase = ctx.track(fid, src, os.path.getsize(src))
     if os.path.exists(dst):
         written = expected      # _claim_dest only hands back an existing file that matched expected
     else:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         try:
-            written = copy_and_hash(src, dst)
+            written = copy_and_hash(src, dst, progress=phase('copying'))
         except BaseException:
             if os.path.exists(dst):
                 os.unlink(dst)
@@ -183,7 +215,7 @@ def _copy_verify_delete(ctx, fid, src, dst, expected):
             os.unlink(dst)
             ctx.set_status(fid, 'error', expected, "source changed during copy; source kept")
             return 'error', f"source changed during copy: {src}"
-    if sha256_file(dst, nocache=True) != written:
+    if sha256_file(dst, nocache=True, progress=phase('verifying on NAS')) != written:
         os.unlink(dst)
         ctx.set_status(fid, 'error', written, "copy read back from destination did not match; source kept")
         return 'error', f"destination verification failed: {dst}"
@@ -216,7 +248,7 @@ def transfer_one(ctx, fid, src, planned):
         if fast:
             return _copy_verify_delete(ctx, fid, src, dst, None)
 
-        src_hash = sha256_file(src)
+        src_hash = sha256_file(src, progress=ctx.track(fid, src, os.path.getsize(src))('hashing source'))
         while True:
             with ctx.db_lock:
                 dup = ctx.conn.execute(
@@ -248,6 +280,8 @@ def transfer_one(ctx, fid, src, planned):
     except Exception as e:
         ctx.set_status(fid, 'error', None, str(e))
         return 'error', f"{src}: {e}"
+    finally:
+        ctx.untrack(fid)
 
 
 def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=False):
@@ -268,8 +302,18 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=Fal
     total = len(rows)
     total_bytes = sum(r['file_size'] or 0 for r in rows)
     bytes_done = completed = 0
-    start = last_beat = time.time()
-    set_progress(conn, ctx.db_lock, phase='transferring', batch_done=0, batch_total=total)
+    start = time.time()
+    set_progress(conn, ctx.db_lock, phase='transferring', batch_done=0, batch_total=total, large=[])
+
+    # Big files can run for minutes without anything finishing; keep the status page live meanwhile.
+    beat_stop = threading.Event()
+
+    def heartbeat():
+        while not beat_stop.wait(2):
+            set_progress(conn, ctx.db_lock, batch_done=ctx.completed, large=ctx.large_snapshot())
+
+    beat = threading.Thread(target=heartbeat, name='progress-heartbeat', daemon=True)
+    beat.start()
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {}
@@ -283,14 +327,12 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=Fal
             status, err = fut.result()
             counts[status] += 1
             completed += 1
+            ctx.completed = completed
             bytes_done += row['file_size'] or 0
             if err:
                 print(f"\n  ERROR: {err}")
             elif verbose and status == 'duplicate_removed':
                 print(f"\n  DUPLICATE removed: {row['original_path']}")
-            if time.time() - last_beat >= 2:
-                set_progress(conn, ctx.db_lock, batch_done=completed)
-                last_beat = time.time()
             elapsed = time.time() - start
             if elapsed > 0:
                 pct = bytes_done / total_bytes * 100 if total_bytes else 100
@@ -302,5 +344,8 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=Fal
                 set_progress(conn, ctx.db_lock, phase='stopping: finishing in-flight files')
                 pool.shutdown(wait=True, cancel_futures=True)
                 break
+    beat_stop.set()
+    beat.join()
+    set_progress(conn, ctx.db_lock, batch_done=completed, large=[])
     print()
     return counts

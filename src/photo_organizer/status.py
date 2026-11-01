@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from photo_organizer.archive import PAGE as ARCHIVE_PAGE, archive_snapshot, month_detail
 from photo_organizer.db import DEFAULT_DB_PATH, init_db
+from photo_organizer.hashing import LARGE_FILE
 from photo_organizer.work_queue import enqueue
 
 MOVED = "('done', 'duplicate_removed')"
@@ -84,6 +85,16 @@ def snapshot(db_path):
             return {'files_per_s': r[0] / span, 'bytes_per_s': r[1] / span, 'files': r[0]}
 
         rates = {'1m': window(60), '10m': window(600), 'run': {'files_per_s': 0, 'bytes_per_s': 0, 'files': 0}}
+        # Live bytes/s: small files as they finish, plus large files' in-progress rate (a 40 GB clip
+        # would otherwise read as zero for minutes, then as a one-minute spike when it completes).
+        lower = max(now - datetime.timedelta(seconds=60), started) if started else now - datetime.timedelta(seconds=60)
+        small = conn.execute(
+            f"SELECT COALESCE(SUM(file_size), 0) FROM files WHERE status IN {MOVED} AND file_size < ? "
+            f"AND updated_at >= ?", (LARGE_FILE, lower.strftime('%Y-%m-%dT%H:%M:%S')),
+        ).fetchone()[0]
+        large = run.get('large') or [] if run.get('alive') else []
+        rates['live'] = {'bytes_per_s': small / max((now - lower).total_seconds(), 1)
+                         + sum(f.get('bytes_per_s', 0) for f in large)}
         if started:
             ended = datetime.datetime.fromisoformat(run['finished_at']) if run.get('finished_at') else now
             span = max((ended - started).total_seconds(), 1)
@@ -187,6 +198,8 @@ td.n, th.n { text-align:right; }
 .qbtn:hover { color:var(--bad); border-color:var(--bad); }
 #qmsg.ok { color:var(--accent); } #qmsg.err { color:var(--bad); }
 .path .to { color:var(--accent); margin-top:2px; }
+.lf { margin-bottom:10px; } .lf:last-child { margin-bottom:0; }
+.lft { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
 .path .to.st-review, .path .to.st-ignored { color:var(--warn); } .path .to.st-error { color:var(--bad); }
 .st-error { color:var(--bad); } .st-review, .st-ignored { color:var(--warn); } .st-done, .st-duplicate_removed { color:var(--accent); }
 .progress { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:8px; }
@@ -205,6 +218,7 @@ svg { width:100%; height:90px; display:block; }
   <div class="card"><div class="k">Batch</div><div class="v" id="batch">–</div><div class="s" id="batchs"></div>
     <div class="progress"><div id="bar" style="width:0"></div></div></div>
 </div>
+<div class="card" id="largecard" style="margin-bottom:12px;display:none"><h2>Large files in flight</h2><div id="large"></div></div>
 <div class="card" style="margin-bottom:12px"><h2>Queue <span id="worker" class="s" style="text-transform:none;letter-spacing:0"></span></h2>
   <form id="qform" class="qform" autocomplete="off">
     <input id="qpath" list="qdirs" placeholder="/Volumes/Photowork/Masters — type a path; subfolders are suggested" spellcheck="false">
@@ -259,7 +273,21 @@ function render(d) {
   $('fps2').textContent = r.alive
     ? `10-min ${b.files_per_s.toFixed(1)} · run ${ra.files_per_s.toFixed(1)} · scanning ${d.rates.scan_files_per_s.toFixed(1)}/s`
     : `${num(ra.files)} files moved in last run`;
-  $('mbps').textContent = bytes(main.bytes_per_s) + '/s';
+  $('mbps').textContent = bytes(r.alive ? d.rates.live.bytes_per_s : main.bytes_per_s) + '/s';
+  const lg = (r.alive && r.large) || [];
+  $('largecard').style.display = lg.length ? 'block' : 'none';
+  $('large').replaceChildren(...lg.map(f => {
+    const pct = f.size ? 100 * f.done / f.size : 0, rate = f.bytes_per_s || 0;
+    const eta = rate > 0 ? (f.size - f.done) / rate : null;
+    const box = document.createElement('div'); box.className = 'lf';
+    const top = document.createElement('div'); top.className = 'lft';
+    const name = document.createElement('span'); name.className = 'path'; name.textContent = f.name; name.title = f.source;
+    const info = document.createElement('span'); info.className = 's';
+    info.textContent = `${f.phase} · ${bytes(f.done)} / ${bytes(f.size)} · ${bytes(rate)}/s · ${eta == null ? '' : dur(eta) + ' left'}`;
+    top.append(name, info);
+    const bar = document.createElement('div'); bar.className = 'progress';
+    const fill = document.createElement('div'); fill.style.width = pct.toFixed(1) + '%'; bar.append(fill);
+    box.append(top, bar); return box; }));
   $('mbps2').textContent = r.alive ? `10-min ${bytes(b.bytes_per_s)}/s · run ${bytes(ra.bytes_per_s)}/s` : 'last run average';
   $('eta').textContent = r.alive ? dur(d.eta_seconds) : (r.finished ? 'done' : '–');
   $('pend').textContent = `${num(d.pending.files)} pending · ${bytes(d.pending.bytes)}`;

@@ -445,3 +445,27 @@ def test_queue_marks_time_machine_folders_copy_only(tmp_path):
     enqueue(conn, str(tm))
     enqueue(conn, str(plain))
     assert [r[0] for r in conn.execute("SELECT keep_sources FROM queue ORDER BY id")] == [1, 0]
+
+
+def test_large_file_copy_reports_progress(tmp_path, monkeypatch):
+    from photo_organizer import hashing
+    monkeypatch.setattr(hashing, 'LARGE_FILE', 1024)
+    src = tmp_path / 'big.mp4'
+    src.write_bytes(os.urandom(20 * 1024 * 1024 + 17))
+    seen = []
+    digest = hashing.copy_and_hash(str(src), str(tmp_path / 'copy.mp4'), progress=seen.append)
+    assert digest == hashing.sha256_file(str(src)) == hashing.sha256_file(str(tmp_path / 'copy.mp4'))
+    assert seen[-1] == src.stat().st_size and seen == sorted(seen) and len(seen) > 1
+
+
+def test_run_tracks_large_files_end_to_end(env, monkeypatch):
+    from photo_organizer import hashing, transfer
+    monkeypatch.setattr(hashing, 'LARGE_FILE', 1024)
+    monkeypatch.setattr(transfer, 'LARGE_FILE', 1024)
+    src, dest, go, rows = env
+    photo = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:09:09 09:09:09", (9, 0, 9))
+    with open(photo, 'ab') as f:
+        f.write(os.urandom(256 * 1024))      # well over the patched 1 KB threshold
+    go()
+    assert files_under(dest) == ['2020/09/2020-09-09/IMG_1.jpg']
+    assert rows()[photo]['status'] == 'done' and not os.path.exists(photo)
