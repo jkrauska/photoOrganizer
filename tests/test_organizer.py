@@ -156,6 +156,18 @@ def test_dry_run_changes_nothing_and_terminates(env):
     assert files_under(src) == []
 
 
+def test_run_only_moves_its_own_sources(env, tmp_path):
+    src, dest, go, rows = env
+    other = tmp_path / 'other'
+    make_jpeg(f"{other}/d/IMG_9.jpg", "2019:09:09 09:09:09", (9, 1, 1))
+    make_jpeg(f"{src}/d/IMG_1.jpg", "2020:01:02 03:04:05")
+    go(sources=[other], execute=False)       # dry run plans the other folder
+    go()                                      # execute on src only
+    assert files_under(dest) == ['2020/01/2020-01-02/IMG_1.jpg']
+    assert os.path.exists(f"{other}/d/IMG_9.jpg")
+    assert rows()[f"{other}/d/IMG_9.jpg"]['status'] == 'pending'
+
+
 def test_interrupted_partial_copy_is_recovered(env, tmp_path):
     src, dest, go, rows = env
     photo = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:01:02 03:04:05")

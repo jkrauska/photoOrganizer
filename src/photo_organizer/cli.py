@@ -47,8 +47,11 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
             if limit and want <= 0:
                 break
 
+            # Only this run's sources: an earlier dry run over other folders must not move here.
             pending = conn.execute(
-                "SELECT id FROM files WHERE status = 'pending' LIMIT ?", (want,)
+                f"SELECT id FROM files WHERE status = 'pending' "
+                f"AND source_root IN ({','.join('?' * len(sources))}) ORDER BY id LIMIT ?",
+                (*sources, want),
             ).fetchall() if execute else []
             if pending:
                 batch_ids = [r['id'] for r in pending]

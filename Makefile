@@ -1,9 +1,10 @@
 # Photo cleanup into the canonical store. Override any variable on the command line, e.g.
 #   make run LIMIT=200
 #   make run YES=1                      # no per-batch prompts (long unattended runs)
-#   make inventory SOURCES="/Volumes/2t/dump"
+#   make run SOURCES="/Volumes/Photowork/Image Archive"
+# SOURCES is comma-separated so paths may contain spaces.
 
-SOURCES ?= /Volumes/fileshares/photos /Volumes/fileshares/photosCleanup2026 /Volumes/Photowork
+SOURCES ?= /Volumes/fileshares/photos,/Volumes/fileshares/photosCleanup2026,/Volumes/Photowork
 DEST    ?= /Volumes/photoArk
 CATALOG ?= $(HOME)/.photo-organizer/catalog.db
 LOGDIR  ?= $(HOME)/.photo-organizer/logs
@@ -19,7 +20,9 @@ SHELL := /bin/bash
 export PYTHONUNBUFFERED := 1
 
 STAMP := $(shell date +%Y%m%d-%H%M%S)
-ORGANIZE = uv run photo-organizer $(foreach s,$(SOURCES),--source "$(s)") --dest "$(DEST)" \
+ORGANIZE = IFS=',' read -ra src <<< "$(SOURCES)"; args=(); \
+	for s in "$${src[@]}"; do args+=(--source "$$s"); done; \
+	uv run photo-organizer "$${args[@]}" --dest "$(DEST)" \
 	--db "$(CATALOG)" --limit $(LIMIT) --batch-size $(BATCH) --workers $(WORKERS) \
 	--exif-workers $(EXIF_WORKERS) $(if $(YES),--yes)
 
