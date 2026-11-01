@@ -334,6 +334,19 @@ def test_enqueue_rejects_folders_overlapping_the_store(tmp_path):
     assert enqueue(conn, str(store / '..' / 'store' / '2020'), str(store))[0] is None
 
 
+def test_copy_keeps_mtime_but_not_local_flags(tmp_path):
+    from photo_organizer.hashing import copy_and_hash
+    UF_TRACKED = 0x40                         # set by macOS document tracking; SMB rejects it
+    src = tmp_path / 'tracked.arw'
+    src.write_bytes(b'raw bytes')
+    os.utime(src, (1_600_000_000, 1_600_000_000))
+    os.chflags(src, UF_TRACKED)
+    dst = tmp_path / 'copy.arw'
+    copy_and_hash(str(src), str(dst))
+    assert dst.stat().st_mtime == 1_600_000_000
+    assert dst.stat().st_flags & UF_TRACKED == 0
+
+
 def test_copy_and_hash_never_overwrites(tmp_path):
     from photo_organizer.hashing import copy_and_hash
     (tmp_path / 'a').write_bytes(b'new')
