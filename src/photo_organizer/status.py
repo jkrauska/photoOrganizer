@@ -201,6 +201,10 @@ function bytes(b) { const u=['B','KB','MB','GB','TB']; let i=0; b=b||0; while (b
   return b.toFixed(b<10&&i?1:0)+' '+u[i]; }
 function dur(s) { if (s==null) return '–'; s=Math.round(s); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m ${s%60}s` : `${s}s`; }
+// Catalog timestamps are UTC (some without a zone suffix); show them in the browser's local time.
+function toDate(s) { if (!s) return null; return new Date(/Z|[+-]\d\d:\d\d$/.test(s) ? s : s + 'Z'); }
+function localTime(s) { const d = toDate(s); return d ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : ''; }
+function localDateTime(s) { const d = toDate(s); return d ? d.toLocaleString([], {dateStyle:'medium', timeStyle:'medium'}) : ''; }
 function cell(tr, text, cls) { const td=document.createElement('td'); td.textContent=text; if (cls) td.className=cls; tr.appendChild(td); return td; }
 function head(t, cols) { t.replaceChildren(); const tr=document.createElement('tr');
   cols.forEach(([c, cls]) => { const th=document.createElement('th'); th.textContent=c; if (cls) th.className=cls; tr.appendChild(th); }); t.appendChild(tr); }
@@ -228,7 +232,7 @@ function render(d) {
   $('pend').textContent = `${num(d.pending.files)} pending · ${bytes(d.pending.bytes)}`;
   $('batch').textContent = r.batch ?? '–';
   const bt = r.batch_total || 0, bd = r.batch_done || 0, moving = r.alive && r.phase === 'transferring';
-  $('batchs').textContent = !r.alive ? (r.finished_at ? `ended ${r.finished_at.slice(11, 19)}Z` : '')
+  $('batchs').textContent = !r.alive ? (r.finished_at ? `ended ${localTime(r.finished_at)}` : '')
     : moving ? `${num(bd)} / ${num(bt)} files`
     : r.phase === 'reading dates' && r.dates_total ? `dates ${num(r.dates_read || 0)} / ${num(r.dates_total)}`
     : (r.scanned_in_batch ? `${num(r.scanned_in_batch)} scanned` : '');
@@ -247,7 +251,7 @@ function render(d) {
     rect.setAttribute('x', W - (ago+1)*bw + 1); rect.setAttribute('width', bw - 2);
     rect.setAttribute('y', H - h); rect.setAttribute('height', h); rect.setAttribute('fill', 'var(--bar)');
     const tip = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-    tip.textContent = `${p.minute}Z · ${p.files} files · ${bytes(p.bytes)}`; rect.appendChild(tip);
+    tip.textContent = `${t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · ${p.files} files · ${bytes(p.bytes)}`; rect.appendChild(tip);
     svg.appendChild(rect);
   });
 
@@ -260,7 +264,7 @@ function render(d) {
     cell(tr, num((c.review||0)+(c.ignored||0)+(c.error||0)), 'n'); });
 
   const re = $('recent'); head(re, [['When'], ['Status'], ['From → To']]);
-  d.recent.forEach(x => { const tr=row(re); cell(tr, (x.updated_at||'').slice(11,19)+'Z', 's');
+  d.recent.forEach(x => { const tr=row(re); cell(tr, localTime(x.updated_at), 's');
     cell(tr, LABEL[x.status]||x.status, 'st-'+x.status);
     const td = cell(tr, '', 'path');
     const from = document.createElement('div'); from.textContent = x.source; from.title = (x.source_root||'') + '/' + x.source;
@@ -273,7 +277,7 @@ function render(d) {
   if (!d.errors.length) { const tr=row(er); cell(tr, 'None', 'muted'); cell(tr, ''); }
   d.errors.forEach(x => { const tr=row(er); cell(tr, x.original_path, 'path'); cell(tr, x.error_message, 'st-error'); });
 
-  $('meta').textContent = r.started_at ? `Run started ${r.started_at} · elapsed ${dur(r.elapsed)} · heartbeat ${dur(r.heartbeat_age)} ago · dest ${r.dest||''}` : '';
+  $('meta').textContent = r.started_at ? `Run started ${localDateTime(r.started_at)} · elapsed ${dur(r.elapsed)} · heartbeat ${dur(r.heartbeat_age)} ago · dest ${r.dest||''}` : '';
 }
 
 async function tick() {
