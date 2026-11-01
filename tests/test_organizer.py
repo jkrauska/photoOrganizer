@@ -59,7 +59,16 @@ def test_same_filename_in_different_folders_keeps_each_date(env):
     go()
     assert files_under(dest) == ['2021/04/2021-04-17/JMK06399.jpg', '2022/05/2022-05-21/JMK06399.jpg']
     assert files_under(src) == []
-    assert not any(os.scandir(src)), "emptied folders are pruned"
+    assert not src.exists(), "an emptied source folder is removed along with its subfolders"
+
+
+def test_source_folder_kept_while_anything_remains(env):
+    src, dest, go, _ = env
+    make_jpeg(f"{src}/a/IMG_1.jpg", "2020:01:02 03:04:05")
+    (src / '.DS_Store').write_text('junk')
+    (src / 'keep.txt').write_text('unhandled type stays')
+    go()
+    assert sorted(os.listdir(src)) == ['.DS_Store', 'keep.txt'], "emptied subfolder removed, root kept"
 
 
 def test_identical_files_in_one_batch_are_copied_once(env):
@@ -200,6 +209,32 @@ def test_unique_size_skips_prehash_but_same_size_duplicates_are_caught(env):
     assert files_under(dest) == ['2020/03/2020-03-03/IMG_1.jpg', '2020/03/2020-03-04/OTHER.jpg']
     assert sorted(r['status'] for r in rows().values()) == ['done', 'done', 'duplicate_removed']
     assert all(r['sha256'] for r in rows().values())
+
+
+def test_time_machine_deny_acl_is_stripped_only_after_verified_copy(env):
+    src, dest, go, rows = env
+    photo = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:05:05 05:05:05")
+    subprocess.run(['chmod', '+a', 'group:everyone deny write,delete,append,writeattr,writeextattr,chown',
+                    photo], check=True)
+    go()
+    assert files_under(dest) == ['2020/05/2020-05-05/IMG_1.jpg']
+    assert not os.path.exists(photo)
+    assert rows()[photo]['status'] == 'done' and rows()[photo]['error_message'] is None
+
+
+def test_undeletable_source_stays_done_and_is_retried(env):
+    src, dest, go, rows = env
+    photo = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:05:05 05:05:05")
+    os.chmod(src / 'a', 0o555)              # folder not writable: the delete fails, not via an ACL
+    try:
+        go()
+        r = rows()[photo]
+        assert r['status'] == 'done' and r['error_message'].startswith('source not removed')
+        assert os.path.exists(photo) and files_under(dest) == ['2020/05/2020-05-05/IMG_1.jpg']
+    finally:
+        os.chmod(src / 'a', 0o755)
+    go()                                    # next run re-verifies the copy and removes the source
+    assert not os.path.exists(photo) and rows()[photo]['error_message'] is None
 
 
 def test_copy_and_hash_never_overwrites(tmp_path):

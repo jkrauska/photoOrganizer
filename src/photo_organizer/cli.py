@@ -15,7 +15,7 @@ from photo_organizer.progress import finish_run, set_progress, start_run
 from photo_organizer.report import print_report
 from photo_organizer.scanner import PriorCatalogs, is_within, iter_source_files, scan_batch
 from photo_organizer.state import DEFAULT_STOP_FILE, configure_stop_file, shutdown_requested, signal_handler
-from photo_organizer.transfer import execute_transfers, recover_interrupted
+from photo_organizer.transfer import execute_transfers, recover_interrupted, retry_source_removal
 
 
 def ts():
@@ -34,11 +34,15 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         recovered = recover_interrupted(conn)
         if recovered:
             print(f"Recovered {recovered:,} files interrupted mid-transfer")
+        if execute:
+            removed, kept = retry_source_removal(conn, sources)
+            if kept:
+                print(f"Removed {removed:,} of {kept:,} sources left behind by earlier failed deletes")
 
         known = {r[0] for r in conn.execute("SELECT original_path FROM files")}
         file_iter = iter_source_files(sources, dest, known)
         prior = PriorCatalogs()
-        totals = {'done': 0, 'duplicate_removed': 0, 'error': 0, 'review': 0}
+        totals = {'done': 0, 'duplicate_removed': 0, 'source_kept': 0, 'error': 0, 'review': 0}
         processed = 0
         batch_num = 0
 
@@ -83,7 +87,8 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
                 for k, v in counts.items():
                     totals[k] += v
                 print(f"  Batch {batch_num}: {counts['done']:,} moved | "
-                      f"{counts['duplicate_removed']:,} duplicates removed | {counts['error']:,} errors")
+                      f"{counts['duplicate_removed']:,} duplicates removed | "
+                      f"{counts['source_kept']:,} sources not removable | {counts['error']:,} errors")
                 backup_db(conn, dest)
 
             if exhausted:

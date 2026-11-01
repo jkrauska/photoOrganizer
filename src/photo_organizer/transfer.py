@@ -8,6 +8,7 @@ Anything that fails verification keeps its source and is marked 'error'.
 """
 
 import os
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,50 @@ def recover_interrupted(conn):
     conn.execute("UPDATE files SET status = 'pending' WHERE status IN ('copying', 'copied')")
     conn.commit()
     return len(rows)
+
+
+SOURCE_KEPT = 'source not removed: '
+
+
+def _has_time_machine_deny_acl(path):
+    """Files copied out of a Time Machine backup keep its 'group:everyone deny ... delete' ACL."""
+    out = subprocess.run(['ls', '-lde', path], capture_output=True, text=True).stdout
+    return any('group:everyone deny' in line and 'delete' in line for line in out.splitlines()[1:])
+
+
+def remove_source(path):
+    """Delete a source whose bytes are verified in the store. Only the Time Machine deny ACL is
+    stripped to allow this; any other permission problem is raised and the source stays."""
+    try:
+        os.unlink(path)
+    except PermissionError:
+        if not _has_time_machine_deny_acl(path):
+            raise
+        subprocess.run(['chmod', '-N', path], check=True, capture_output=True)
+        os.unlink(path)
+
+
+def retry_source_removal(conn, sources):
+    """Delete sources left behind by an earlier failed delete, after re-verifying their store copy."""
+    placeholders = ','.join('?' * len(sources))
+    rows = conn.execute(
+        f"SELECT id, original_path, dest_path, sha256 FROM files WHERE status = 'done' "
+        f"AND error_message LIKE '{SOURCE_KEPT}%' AND source_root IN ({placeholders})",
+        sources,
+    ).fetchall()
+    removed = 0
+    for r in rows:
+        try:
+            if os.path.exists(r['original_path']):
+                if sha256_file(r['dest_path'], nocache=True) != r['sha256']:
+                    continue
+                remove_source(r['original_path'])
+            conn.execute("UPDATE files SET error_message = NULL WHERE id = ?", (r['id'],))
+            removed += 1
+        except OSError as e:
+            conn.execute("UPDATE files SET error_message = ? WHERE id = ?", (f"{SOURCE_KEPT}{e}", r['id']))
+    conn.commit()
+    return removed, len(rows)
 
 
 class TransferContext:
@@ -65,7 +110,7 @@ def _remove_duplicate(ctx, fid, src, src_hash, canonical):
     if not ctx.canonical_ok(canonical, src_hash):
         ctx.set_status(fid, 'error', src_hash, f"canonical copy {canonical} failed verification; source kept")
         return 'error', f"canonical copy failed verification: {canonical}"
-    os.unlink(src)
+    remove_source(src)
     with ctx.db_lock:
         # Release the planned destination name so it isn't reserved by a file that was never copied.
         ctx.conn.execute(
@@ -129,7 +174,12 @@ def _copy_verify_delete(ctx, fid, src, dst, expected):
     ctx.set_status(fid, 'done', written)
     with ctx.verify_lock:
         ctx.verified[dst] = True
-    os.unlink(src)
+    try:
+        remove_source(src)
+    except OSError as e:
+        # The copy is verified and stays 'done'; a later run retries the delete.
+        ctx.set_status(fid, 'done', written, f"{SOURCE_KEPT}{e}")
+        return 'source_kept', f"copied and verified, but source not removed: {src}: {e}"
     return 'done', None
 
 
@@ -191,7 +241,7 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False):
         f"ORDER BY dest_path",
         file_ids,
     ).fetchall()
-    counts = {'done': 0, 'duplicate_removed': 0, 'error': 0}
+    counts = {'done': 0, 'duplicate_removed': 0, 'source_kept': 0, 'error': 0}
     if not rows:
         print("  No files to transfer.")
         return counts

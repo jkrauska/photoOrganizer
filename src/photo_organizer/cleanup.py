@@ -11,9 +11,9 @@ def _is_junk(name):
 
 
 def prune_empty_dirs(root, verbose=False):
-    """Delete folders under root that hold nothing but OS junk files, deepest first.
-    Never enters NAS snapshot/recycle folders or app bundles; root itself is kept.
-    Returns the number of folders removed."""
+    """Delete folders under root that hold nothing but OS junk files, deepest first, including
+    root itself once it is emptied. Never removes a mount point, and never enters NAS
+    snapshot/recycle folders or app bundles. Returns the number of folders removed."""
 
     def visit(path):
         removed = 0
@@ -29,7 +29,7 @@ def prune_empty_dirs(root, verbose=False):
             remaining = os.listdir(path)
         except OSError:
             return removed, False
-        if path == root or any(not _is_junk(name) for name in remaining):
+        if os.path.ismount(path) or any(not _is_junk(name) for name in remaining):
             return removed, False
         try:
             for name in remaining:
