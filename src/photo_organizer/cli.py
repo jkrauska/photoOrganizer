@@ -8,7 +8,7 @@ import time
 import humanize
 
 from photo_organizer.cleanup import prune_empty_dirs
-from photo_organizer.dates import require_exiftool
+from photo_organizer.dates import DEFAULT_EXIF_WORKERS, require_exiftool
 from photo_organizer.db import DEFAULT_DB_PATH, backup_db, init_db
 from photo_organizer.planner import plan_destinations
 from photo_organizer.progress import finish_run, set_progress, start_run
@@ -23,7 +23,7 @@ def ts():
 
 
 def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit=0,
-        verbose=False, confirm=lambda prompt: True):
+        verbose=False, confirm=lambda prompt: True, exif_workers=DEFAULT_EXIF_WORKERS):
     """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals."""
     conn = init_db(db_path)
     start_run(conn, sources, dest, execute)
@@ -56,7 +56,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
                 exhausted = False
             else:
                 print(f"\n[{ts()}] --- Batch {batch_num}: scanning ---")
-                batch_ids, exhausted = scan_batch(file_iter, conn, known, prior, want, verbose)
+                batch_ids, exhausted = scan_batch(file_iter, conn, known, prior, want, verbose, exif_workers)
                 if not batch_ids:
                     break
 
@@ -118,7 +118,9 @@ def main():
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--limit', type=int, default=0, help='Process at most N files (0 = no limit)')
     parser.add_argument('--batch-size', type=int, default=5000)
-    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--workers', type=int, default=4, help='Parallel copy/verify threads')
+    parser.add_argument('--exif-workers', type=int, default=DEFAULT_EXIF_WORKERS,
+                        help=f'Parallel exiftool processes for date reads (default: {DEFAULT_EXIF_WORKERS})')
     args = parser.parse_args()
 
     require_exiftool()
@@ -151,5 +153,5 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     start = time.time()
     run(sources, dest, args.db, args.execute, args.batch_size, args.workers, args.limit,
-        args.verbose, confirm)
+        args.verbose, confirm, args.exif_workers)
     print(f"\nTotal time: {humanize.naturaldelta(time.time() - start)}")

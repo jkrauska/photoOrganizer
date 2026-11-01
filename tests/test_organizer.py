@@ -1,3 +1,4 @@
+import datetime
 import os
 import shutil
 import sqlite3
@@ -184,6 +185,19 @@ def test_status_snapshot_reflects_finished_run(env, tmp_path):
     assert {s['status']: s['files'] for s in snap['statuses']} == {'done': 1, 'review': 1}
     assert snap['rates']['1m']['files'] == 1
     assert snap['recent'][0]['status'] in ('done', 'review')
+
+
+def test_video_container_dates_utc_unless_camera_writes_local():
+    from photo_organizer.dates import pick_capture_date
+    sony = {'CreateDate': '2012:02:19 15:28:53', 'MajorBrand': 'MPEG-4 (.MP4) for SonyPSP'}
+    assert pick_capture_date(sony, True)[0].isoformat() == '2012-02-19T15:28:53'
+    iphone = {'CreateDate': '2012:02:21 03:35:31', 'MajorBrand': 'Apple QuickTime (.MOV/QT)'}
+    local = pick_capture_date(iphone, True)[0]
+    assert local.astimezone(datetime.timezone.utc).isoformat() == '2012-02-21T03:35:31+00:00'
+    zoned = {'CreationDate': '2019:07:04 21:10:00-07:00', 'CreateDate': '2019:07:05 04:10:00'}
+    assert pick_capture_date(zoned, True)[0].isoformat() == '2019-07-04T21:10:00-07:00'
+    photo = {'CreateDate': '2010:05:01 08:00:00'}
+    assert pick_capture_date(photo, False)[0].isoformat() == '2010-05-01T08:00:00'
 
 
 def test_parse_exif_datetime_keeps_offset():

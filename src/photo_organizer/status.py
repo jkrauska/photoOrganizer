@@ -200,8 +200,11 @@ function render(d) {
   $('batch').textContent = r.batch ?? '–';
   const bt = r.batch_total || 0, bd = r.batch_done || 0, moving = r.alive && r.phase === 'transferring';
   $('batchs').textContent = !r.alive ? (r.finished_at ? `ended ${r.finished_at.slice(11, 19)}Z` : '')
-    : moving ? `${num(bd)} / ${num(bt)} files` : (r.scanned_in_batch ? `${num(r.scanned_in_batch)} scanned` : '');
-  $('bar').style.width = (moving && bt ? 100*bd/bt : 0) + '%';
+    : moving ? `${num(bd)} / ${num(bt)} files`
+    : r.phase === 'reading dates' && r.dates_total ? `dates ${num(r.dates_read || 0)} / ${num(r.dates_total)}`
+    : (r.scanned_in_batch ? `${num(r.scanned_in_batch)} scanned` : '');
+  const reading = r.alive && r.phase === 'reading dates' && r.dates_total;
+  $('bar').style.width = (moving && bt ? 100*bd/bt : reading ? 100*(r.dates_read||0)/r.dates_total : 0) + '%';
 
   const svg = $('chart'), pts = d.per_minute; svg.replaceChildren();
   const W = 600, H = 90, max = Math.max(1, ...pts.map(p => p.files));

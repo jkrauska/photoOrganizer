@@ -26,6 +26,18 @@ brew install exiftool
 
 ## Usage
 
+The Makefile wraps the common runs (sources, dest and catalog default to this library):
+
+```bash
+make inventory              # dry run over all sources
+make run LIMIT=200          # move + verify + delete, prompting per batch (YES=1 to skip prompts)
+make status                 # live page at http://localhost:8077/
+make enrich                 # Gemma 4 + InsightFace pipeline (Apple Photos library)
+make help                   # all targets and variables
+```
+
+Logs land in `~/.photo-organizer/logs/`. Under the hood:
+
 ```bash
 # 1. Inventory (dry run): catalog every file, read dates, plan destinations. Nothing moves.
 uv run photo-organizer --source /Volumes/fileshares/photos --source /Volumes/Photowork \

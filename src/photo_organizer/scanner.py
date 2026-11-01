@@ -8,7 +8,9 @@ from photo_organizer.constants import (
     ALL_EXTENSIONS, MEDIA_EXTENSIONS, PRIOR_CATALOG_NAME, SIDECAR_EXTENSIONS,
     SKIP_DIR_SUFFIXES, SKIP_NAMES,
 )
-from photo_organizer.dates import date_from_dirpath, date_from_filename, read_exif_dates
+from photo_organizer.dates import (
+    DEFAULT_EXIF_WORKERS, date_from_dirpath, date_from_filename, read_exif_dates,
+)
 from photo_organizer.db import BACKUP_NAME
 from photo_organizer.progress import set_progress
 from photo_organizer.state import shutdown_requested
@@ -123,7 +125,7 @@ def _resolve_date(filepath, source_root, exif_hit, prior):
     return None, None, 'mtime', None
 
 
-def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False):
+def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False, exif_workers=DEFAULT_EXIF_WORKERS):
     """Catalog about `limit` new media/sidecar files from file_iter, always ending at a folder boundary
     so a photo and its sidecars are never split across batches.
 
@@ -165,8 +167,13 @@ def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False):
 
         batch.append((root, dirpath, fname, filepath, ext, st.st_size, mtime))
 
-    set_progress(conn, phase='reading dates', scanned_in_batch=len(batch) + ignored)
-    exif = read_exif_dates([b[3] for b in batch if b[4] in MEDIA_EXTENSIONS])
+    set_progress(conn, phase='reading dates', scanned_in_batch=len(batch) + ignored,
+                 dates_read=0, dates_total=0)
+    exif = read_exif_dates(
+        [b[3] for b in batch if b[4] in MEDIA_EXTENSIONS],
+        on_chunk=lambda done, total: set_progress(conn, dates_read=done, dates_total=total),
+        workers=exif_workers,
+    )
 
     ids = []
     for root, dirpath, fname, filepath, ext, size, mtime in batch:
