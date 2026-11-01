@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 import sqlite3
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Timer
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from photo_organizer.archive import PAGE as ARCHIVE_PAGE, archive_snapshot, month_detail
 from photo_organizer.db import DEFAULT_DB_PATH, init_db
 from photo_organizer.hashing import LARGE_FILE
+from photo_organizer.nas import same_server, smb_mounts
 from photo_organizer.work_queue import enqueue
 
 MOVED = "('done', 'duplicate_removed')"
@@ -140,11 +142,17 @@ def snapshot(db_path):
         worker['alive'] = bool(worker) and not worker.get('stopped') and _pid_alive(worker.get('pid'))
         try:
             queue = [dict(r) for r in conn.execute(
-                "SELECT id, status, source, added_at, finished_at, result, keep_sources FROM queue ORDER BY "
+                "SELECT id, status, source, added_at, finished_at, result, keep_sources, transfer FROM queue ORDER BY "
                 "CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, "
                 "CASE status WHEN 'queued' THEN id ELSE -id END LIMIT 20")]
         except sqlite3.OperationalError:
             queue = []
+        for q in queue:
+            if q['status'] == 'running' and run.get('alive') and run.get('transfer'):
+                q['transfer'] = run['transfer']
+            elif q['status'] == 'queued' and run.get('dest'):
+                host = _expected_server(q['source'], run['dest'])
+                q['transfer_expected'] = f"NAS {host}" if host else 'Mac'
         return {
             'worker': worker, 'queue': queue,
             'run': run, 'rates': rates, 'eta_seconds': eta,
@@ -176,6 +184,9 @@ h1 { font-size:20px; margin:0; }
 .pill { padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid var(--line); }
 .pill.live { color:var(--accent); border-color:var(--accent); }
 .pill.stale { color:var(--warn); border-color:var(--warn); }
+.pill.nas, td.xfer.nas { color:#c026d3; border-color:#c026d3; font-weight:600; }
+.pill.mac, td.xfer.mac { color:#0ea5e9; border-color:#0ea5e9; }
+td.xfer { white-space:nowrap; font-size:12px; }
 .muted { color:var(--muted); }
 .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:12px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; min-width:0; }
@@ -210,7 +221,7 @@ svg { width:100%; height:90px; display:block; }
 .activity { display:grid; grid-template-columns:1fr; gap:12px; }
 @media (min-width:1600px) { .activity { grid-template-columns:3fr 2fr; align-items:start; } }
 </style></head><body><main>
-<header><h1>Photo Organizer</h1><nav><a href="/" style="color:var(--fg);font-weight:600;text-decoration:none;margin-right:12px">Status</a><a href="/archive" style="color:var(--muted);text-decoration:none">Archive</a></nav><span id="pill" class="pill">loading</span><span id="phase" class="muted"></span></header>
+<header><h1>Photo Organizer</h1><nav><a href="/" style="color:var(--fg);font-weight:600;text-decoration:none;margin-right:12px">Status</a><a href="/archive" style="color:var(--muted);text-decoration:none">Archive</a></nav><span id="pill" class="pill">loading</span><span id="xfer" class="pill" style="display:none"></span><span id="phase" class="muted"></span></header>
 <div class="grid">
   <div class="card"><div class="k">Images / s</div><div class="v" id="fps">–</div><div class="s" id="fps2"></div></div>
   <div class="card"><div class="k">Throughput</div><div class="v" id="mbps">–</div><div class="s" id="mbps2"></div></div>
@@ -264,6 +275,10 @@ function render(d) {
   else if (r.finished) { pill.textContent = r.phase || 'finished'; pill.className = 'pill'; }
   else if (r.pid) { pill.textContent = 'not running'; pill.className = 'pill stale'; }
   else { pill.textContent = 'no run yet'; pill.className = 'pill'; }
+  const xf = $('xfer');
+  xf.style.display = r.alive && r.transfer ? '' : 'none';
+  if (r.transfer) { xf.textContent = r.transfer.startsWith('NAS') ? '⚡ ' + r.transfer.split(' (')[0] : 'via Mac (SMB)';
+    xf.className = 'pill ' + (r.transfer.startsWith('NAS') ? 'nas' : 'mac'); xf.title = r.transfer; }
   $('phase').textContent = r.alive ? `${r.phase || ''}${r.current_dir ? ' · ' + r.current_dir : ''}` : '';
 
   const a = d.rates['1m'], b = d.rates['10m'], ra = d.rates.run;
@@ -319,10 +334,13 @@ function render(d) {
   const w = d.worker || {};
   $('worker').textContent = w.alive ? `· worker ${w.pid}: ${w.state || ''}${w.current ? ' — ' + w.current : ''}`
     : (w.pid ? '· worker not running (make worker-bg)' : '· no worker yet (make worker-bg)');
-  const qt = $('queue'); head(qt, [['#'], ['Status'], ['Folder'], ['Result'], ['']]);
-  if (!d.queue.length) { const tr=row(qt); cell(tr, ''); cell(tr, 'empty', 'muted'); cell(tr, 'add a folder above', 's'); cell(tr, ''); cell(tr, ''); }
+  const qt = $('queue'); head(qt, [['#'], ['Status'], ['Transfer'], ['Folder'], ['Result'], ['']]);
+  if (!d.queue.length) { const tr=row(qt); cell(tr, ''); cell(tr, 'empty', 'muted'); cell(tr, ''); cell(tr, 'add a folder above', 's'); cell(tr, ''); cell(tr, ''); }
   d.queue.forEach(q => { const tr=row(qt); cell(tr, q.id, 's');
     cell(tr, q.status, 'st-' + ({done:'done', failed:'error', running:'done', queued:'pending', stopped:'review'}[q.status] || ''));
+    const t = q.transfer || q.transfer_expected, nasT = (t || '').startsWith('NAS');
+    const tc = cell(tr, t ? (nasT ? '⚡ NAS' : 'Mac') + (q.transfer ? '' : ' (expected)') : '', 'xfer ' + (t ? (nasT ? 'nas' : 'mac') : ''));
+    if (t) tc.title = t;
     cell(tr, q.source + (q.keep_sources ? '  [copy-only]' : ''), 'path'); cell(tr, q.result || (q.status === 'queued' ? 'added ' + localTime(q.added_at) : ''), 's');
     const td = cell(tr, '');
     if (q.status === 'queued') { const b = document.createElement('button'); b.className = 'qbtn'; b.textContent = 'Remove';
@@ -380,6 +398,16 @@ $('qform').addEventListener('submit', async ev => {
 tick(); setInterval(tick, 2000);
 </script></body></html>
 """
+
+
+_mounts_cache = {'at': 0.0, 'mounts': {}}
+
+
+def _expected_server(source, dest):
+    """The NAS a queued folder would transfer on (same SMB server as the store), else None."""
+    if time.time() - _mounts_cache['at'] > 30:
+        _mounts_cache.update(at=time.time(), mounts=smb_mounts())
+    return same_server([source], dest, _mounts_cache['mounts'])
 
 
 def _queue_dest(db_path):

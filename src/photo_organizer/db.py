@@ -87,8 +87,11 @@ def init_db(db_path):
             if col not in existing:
                 conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
     conn.executescript(SCHEMA)
-    if 'keep_sources' not in {r['name'] for r in conn.execute("PRAGMA table_info(queue)")}:
+    qcols = {r['name'] for r in conn.execute("PRAGMA table_info(queue)")}
+    if 'keep_sources' not in qcols:
         conn.execute("ALTER TABLE queue ADD COLUMN keep_sources INTEGER NOT NULL DEFAULT 0")
+    if 'transfer' not in qcols:     # how the item's files moved: 'NAS <host>' or 'Mac'
+        conn.execute("ALTER TABLE queue ADD COLUMN transfer TEXT")
     conn.commit()
     return conn
 

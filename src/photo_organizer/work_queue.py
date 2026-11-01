@@ -136,7 +136,7 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
             conn.commit()
             continue
 
-        conn.execute("UPDATE queue SET status = 'running', started_at = datetime('now') WHERE id = ?", (item['id'],))
+        conn.execute("UPDATE queue SET status = 'running', started_at = datetime('now'), result = NULL WHERE id = ?", (item['id'],))
         conn.commit()
         _set_worker_state(conn, state='running', current=item['source'], item=item['id'])
         print(f"\n=== Queue #{item['id']}: {item['source']} ===")
@@ -157,15 +157,15 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
             continue
 
         if totals.get('stopped'):
-            conn.execute("UPDATE queue SET status = 'queued', result = 'stopped; resumes next time' WHERE id = ?",
-                         (item['id'],))
+            conn.execute("UPDATE queue SET status = 'queued', result = 'stopped; resumes next time', transfer = ? "
+                         "WHERE id = ?", (totals.get('transfer'), item['id']))
             conn.commit()
             if os.path.exists(stop_file):
                 os.unlink(stop_file)     # consumed: the next worker starts normally
             print("Stopped; worker exiting. The item stays queued.")
             break
-        conn.execute("UPDATE queue SET status = 'done', finished_at = datetime('now'), result = ? WHERE id = ?",
-                     (_summary(totals), item['id']))
+        conn.execute("UPDATE queue SET status = 'done', finished_at = datetime('now'), result = ?, transfer = ? "
+                     "WHERE id = ?", (_summary(totals), totals.get('transfer'), item['id']))
         conn.commit()
     _set_worker_state(conn, state='stopped', stopped=True)
 

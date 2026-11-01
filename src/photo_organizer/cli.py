@@ -46,10 +46,19 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
             if kept:
                 print(f"Removed {removed:,} of {kept:,} sources left behind by earlier failed deletes")
 
-        if execute and nas:
-            fs = detect_nas(sources, dest)
+        transfer = None
+        if execute:
+            note = None
+            if nas:
+                fs, note = detect_nas(sources, dest)
             if fs:
+                transfer = 'NAS ' + fs.target.split('@')[-1]
                 print("Transfers run on the NAS: " + ', '.join(f"{a} = {b}" for a, b in fs.mapping))
+            else:
+                transfer = 'Mac' + (f" ({note})" if note else '')
+                if note:
+                    print(f"  {note}")
+            set_progress(conn, transfer=transfer)
 
         known = {r[0] for r in conn.execute("SELECT original_path FROM files")}
         file_iter = iter_source_files(sources, dest, known)
@@ -126,6 +135,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         print_report(conn, dry_run=not execute)
         totals['stopped'] = stopped
         totals['keep_sources'] = keep_sources
+        totals['transfer'] = transfer
         return totals
     finally:
         if fs:

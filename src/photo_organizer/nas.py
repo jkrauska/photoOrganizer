@@ -285,13 +285,22 @@ def _visible_names(path):
     return sorted(n for n in os.listdir(path) if not n.startswith('.'))
 
 
-def detect(sources, dest, mounts=None, make_fs=NasFS):
-    """A NasFS when dest and every source are SMB shares of one server reachable over ssh,
-    with each share's server path identified by matching its listing; otherwise None."""
+def same_server(sources, dest, mounts=None):
+    """The SMB server holding dest and every source, or None: whether NAS mode can apply."""
     mounts = smb_mounts() if mounts is None else mounts
     points = [_mount_of(p, mounts) for p in [dest, *sources]]
     if None in points or len({mounts[p][1] for p in points}) != 1:
         return None
+    return mounts[points[0]][1]
+
+
+def detect(sources, dest, mounts=None, make_fs=NasFS):
+    """(NasFS, note) when dest and every source are SMB shares of one server reachable over
+    ssh, with each share's server path identified by matching its listing; else (None, note)."""
+    mounts = smb_mounts() if mounts is None else mounts
+    if not same_server(sources, dest, mounts):
+        return None, None
+    points = [_mount_of(p, mounts) for p in [dest, *sources]]
     user, host, _ = mounts[points[0]]
     fs = make_fs(f"{user}@{host}" if user else host, [])
     try:
@@ -301,13 +310,11 @@ def detect(sources, dest, mounts=None, make_fs=NasFS):
             local = _visible_names(point)
             matches = [nas for nas, names in fs.call('candidates', share=mounts[point][2]) if names == local]
             if len(matches) != 1 or not local:
-                print(f"  NAS mode off: can't identify the server path of {point} (candidates: {matches})")
                 fs.close()
-                return None
+                return None, f"NAS mode off: can't identify the server path of {point} (candidates: {matches})"
             mapping.append((point, matches[0]))
     except OSError as e:
-        print(f"  NAS mode off: {e}")
         fs.close()
-        return None
+        return None, f"NAS mode off: {e}"
     fs.mapping = sorted(mapping, key=lambda m: -len(m[0]))
-    return fs
+    return fs, None

@@ -249,7 +249,8 @@ def test_queue_worker_processes_folders_in_order(env, tmp_path):
     assert add(conn, [str(src), str(other), str(src), str(tmp_path / 'missing')]) == [str(src), str(other)]
     worker(conn, str(dest), db, str(tmp_path / 'STOP'), exit_when_empty=True)
     assert files_under(dest) == ['2020/06/2020-06-06/IMG_1.jpg', '2021/07/2021-07-07/IMG_2.jpg']
-    assert [r[0] for r in conn.execute("SELECT status FROM queue ORDER BY id")] == ['done', 'done']
+    assert [tuple(r) for r in conn.execute("SELECT status, transfer FROM queue ORDER BY id")] == \
+        [('done', 'Mac'), ('done', 'Mac')], "each queued folder records how its files moved"
     assert not src.exists() and not other.exists()
 
 
@@ -513,7 +514,7 @@ def local_nas(root):
 def test_nas_mode_moves_verifies_and_dedups_on_the_server(env, tmp_path, monkeypatch):
     import photo_organizer.cli as cli
     src, dest, go, rows = env
-    monkeypatch.setattr(cli, 'detect_nas', lambda sources, d: local_nas(tmp_path))
+    monkeypatch.setattr(cli, 'detect_nas', lambda sources, d: (local_nas(tmp_path), None))
     a = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:01:02 03:04:05")
     os.utime(a, (1_600_000_000, 1_600_000_000))
     shutil.copy2(a, f"{src}/b-IMG_1.jpg")
@@ -570,11 +571,12 @@ def test_nas_detection_maps_shares_by_listing():
     orig = nas._visible_names
     nas._visible_names = listings.__getitem__
     try:
-        fs = nas.detect(['/Volumes/fileshares/photos/Raw'], '/Volumes/photoArk', mounts, FakeFS)
+        fs, _ = nas.detect(['/Volumes/fileshares/photos/Raw'], '/Volumes/photoArk', mounts, FakeFS)
         assert fs.target == 'me@nas.local'
         assert fs.mapping == [('/Volumes/fileshares', '/mnt/Pool/fileshares'),
                               ('/Volumes/photoArk', '/mnt/Pool/photoArk')]
-        assert nas.detect(['/Volumes/other/a'], '/Volumes/photoArk', mounts, FakeFS) is None
-        assert nas.detect(['/Users/me/Pictures'], '/Volumes/photoArk', mounts, FakeFS) is None
+        assert nas.detect(['/Volumes/other/a'], '/Volumes/photoArk', mounts, FakeFS) == (None, None)
+        assert nas.detect(['/Users/me/Pictures'], '/Volumes/photoArk', mounts, FakeFS) == (None, None)
+        assert nas.same_server(['/Volumes/fileshares/x'], '/Volumes/photoArk', mounts) == 'nas.local'
     finally:
         nas._visible_names = orig
