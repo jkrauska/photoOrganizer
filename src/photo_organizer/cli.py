@@ -9,7 +9,7 @@ import humanize
 
 from photo_organizer.cleanup import prune_empty_dirs
 from photo_organizer.dates import DEFAULT_EXIF_WORKERS, require_exiftool
-from photo_organizer.db import DEFAULT_DB_PATH, backup_db, init_db
+from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, acquire_run_lock, backup_db, init_db
 from photo_organizer.planner import plan_destinations
 from photo_organizer.progress import finish_run, set_progress, start_run
 from photo_organizer.report import print_report
@@ -25,7 +25,9 @@ def ts():
 def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit=0,
         verbose=False, confirm=lambda prompt: True, exif_workers=DEFAULT_EXIF_WORKERS,
         stop_file=DEFAULT_STOP_FILE):
-    """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals."""
+    """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals,
+    with 'stopped' set when a stop was requested. Raises RunLocked if another run holds the catalog."""
+    lock_fd = acquire_run_lock(db_path)
     configure_stop_file(stop_file)
     conn = init_db(db_path)
     start_run(conn, sources, dest, execute)
@@ -106,12 +108,14 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         if execute:
             print(f"Catalog backed up to {backup_db(conn, dest)}")
         print_report(conn, dry_run=not execute)
+        totals['stopped'] = stopped
         return totals
     finally:
         try:
             finish_run(conn, final_phase)
         finally:
             conn.close()
+            os.close(lock_fd)
 
 
 def main():
@@ -168,6 +172,9 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     start = time.time()
-    run(sources, dest, args.db, args.execute, args.batch_size, args.workers, args.limit,
-        args.verbose, confirm, args.exif_workers, args.stop_file)
+    try:
+        run(sources, dest, args.db, args.execute, args.batch_size, args.workers, args.limit,
+            args.verbose, confirm, args.exif_workers, args.stop_file)
+    except RunLocked as e:
+        sys.exit(f"Error: {e}. Wait for it to finish, or add this folder to the queue (make queue SRC=...).")
     print(f"\nTotal time: {humanize.naturaldelta(time.time() - start)}")

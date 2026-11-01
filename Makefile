@@ -28,12 +28,17 @@ ORGANIZE = IFS=',' read -ra src <<< "$(SOURCES)"; args=(); \
 
 STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
-.PHONY: help sync inventory run stop verify status enrich faces browse test
+QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
+
+.PHONY: help sync inventory run queue queue-list worker worker-bg stop verify status enrich faces browse test
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
 	@echo "make run        move into DEST, verify, delete sources (LIMIT=n, YES=1 to skip prompts)"
-	@echo "make stop       stop a running inventory/run gracefully (in-flight files finish)"
+	@echo "make queue SRC=\"/path/a,/path/b\"   add folders to the live queue (any time)"
+	@echo "make queue-list show the queue"
+	@echo "make worker     process the queue in order, then wait for more (worker-bg: in background)"
+	@echo "make stop       stop a running inventory/run/worker gracefully (in-flight files finish)"
 	@echo "make verify     re-read every stored file from the NAS and check its hash"
 	@echo "make status     live status page at http://localhost:$(PORT)/"
 	@echo "make enrich     Gemma 4 + InsightFace analysis, clustering, metadata, index (Apple Photos)"
@@ -55,6 +60,22 @@ inventory: sync | $(LOGDIR)
 
 run: sync | $(LOGDIR)
 	$(ORGANIZE) --execute 2>&1 | tee "$(LOGDIR)/run-$(STAMP).log"
+
+queue: sync
+	@test -n "$(SRC)" || { echo 'usage: make queue SRC="/path/one,/path/two"'; exit 2; }
+	@IFS=',' read -ra src <<< "$(SRC)"; $(QUEUE) add "$${src[@]}"
+
+queue-list: sync
+	@$(QUEUE) list
+
+worker: sync | $(LOGDIR)
+	$(QUEUE) worker --dest "$(DEST)" --batch-size $(BATCH) --workers $(WORKERS) \
+		--exif-workers $(EXIF_WORKERS) --stop-file "$(STOP_FILE)" 2>&1 | tee "$(LOGDIR)/worker-$(STAMP).log"
+
+worker-bg: sync | $(LOGDIR)
+	@nohup $(QUEUE) worker --dest "$(DEST)" --batch-size $(BATCH) --workers $(WORKERS) \
+		--exif-workers $(EXIF_WORKERS) --stop-file "$(STOP_FILE)" > "$(LOGDIR)/worker-$(STAMP).log" 2>&1 & \
+		echo "worker started (pid $$!), log: $(LOGDIR)/worker-$(STAMP).log"
 
 stop:
 	@touch "$(STOP_FILE)" && echo "Stop requested; the run finishes in-flight files and exits. Rerun to resume."

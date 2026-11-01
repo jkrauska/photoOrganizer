@@ -1,5 +1,22 @@
+import fcntl
 import os
 import sqlite3
+
+
+class RunLocked(RuntimeError):
+    pass
+
+
+def acquire_run_lock(db_path):
+    """Only one run may use a catalog at a time; the lock is released when the process exits."""
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    fd = os.open(db_path + '.lock', os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise RunLocked(f"another run is using {db_path}")
+    return fd
 
 # SQLite locking is unreliable over SMB/NFS, so the live catalog stays on local disk
 # and a copy is backed up to the destination after each batch.
@@ -36,8 +53,19 @@ CREATE INDEX IF NOT EXISTS idx_updated_at ON files(updated_at);
 CREATE INDEX IF NOT EXISTS idx_created_at ON files(created_at);
 CREATE INDEX IF NOT EXISTS idx_file_size ON files(file_size);
 
--- Single 'run' row holding the live run's phase and heartbeat as JSON, read by the status page.
+-- 'run' and 'worker' rows holding live state and heartbeats as JSON, read by the status page.
 CREATE TABLE IF NOT EXISTS progress (key TEXT PRIMARY KEY, value TEXT);
+
+-- Source folders waiting for the queue worker: queued -> running -> done | stopped | failed.
+CREATE TABLE IF NOT EXISTS queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    added_at TEXT DEFAULT (datetime('now')),
+    started_at TEXT,
+    finished_at TEXT,
+    result TEXT
+);
 """
 
 ADDED_COLUMNS = {'source_root': 'TEXT', 'origin_path': 'TEXT', 'taken_at': 'TEXT', 'updated_at': 'TEXT'}

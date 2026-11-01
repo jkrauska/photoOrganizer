@@ -120,7 +120,18 @@ def snapshot(db_path):
         errors = [dict(r) for r in conn.execute(
             "SELECT original_path, error_message, updated_at FROM files WHERE status = 'error' "
             "ORDER BY updated_at DESC LIMIT 15")]
+        wrow = conn.execute("SELECT value FROM progress WHERE key = 'worker'").fetchone()
+        worker = json.loads(wrow[0]) if wrow else {}
+        worker['alive'] = bool(worker) and not worker.get('stopped') and _pid_alive(worker.get('pid'))
+        try:
+            queue = [dict(r) for r in conn.execute(
+                "SELECT id, status, source, added_at, finished_at, result FROM queue ORDER BY "
+                "CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, "
+                "CASE status WHEN 'queued' THEN id ELSE -id END LIMIT 20")]
+        except sqlite3.OperationalError:
+            queue = []
         return {
+            'worker': worker, 'queue': queue,
             'run': run, 'rates': rates, 'eta_seconds': eta,
             'pending': {'files': pending[0], 'bytes': pending[1]},
             'statuses': statuses, 'sources': sources, 'per_minute': per_minute,
@@ -181,6 +192,7 @@ svg { width:100%; height:90px; display:block; }
   <div class="card"><div class="k">Batch</div><div class="v" id="batch">–</div><div class="s" id="batchs"></div>
     <div class="progress"><div id="bar" style="width:0"></div></div></div>
 </div>
+<div class="card" style="margin-bottom:12px"><h2>Queue <span id="worker" class="s" style="text-transform:none;letter-spacing:0"></span></h2><table id="queue"></table></div>
 <div class="card" style="margin-bottom:12px"><h2>Moved per minute (last hour)</h2><svg id="chart" preserveAspectRatio="none"></svg></div>
 <div class="two">
   <div class="card"><h2>Catalog</h2><table id="statuses"></table></div>
@@ -202,7 +214,7 @@ function bytes(b) { const u=['B','KB','MB','GB','TB']; let i=0; b=b||0; while (b
 function dur(s) { if (s==null) return '–'; s=Math.round(s); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m ${s%60}s` : `${s}s`; }
 // Catalog timestamps are UTC (some without a zone suffix); show them in the browser's local time.
-function toDate(s) { if (!s) return null; return new Date(/Z|[+-]\d\d:\d\d$/.test(s) ? s : s + 'Z'); }
+function toDate(s) { if (!s) return null; s = s.replace(' ', 'T'); return new Date(/Z|[+-]\d\d:\d\d$/.test(s) ? s : s + 'Z'); }
 function localTime(s) { const d = toDate(s); return d ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : ''; }
 function localDateTime(s) { const d = toDate(s); return d ? d.toLocaleString([], {dateStyle:'medium', timeStyle:'medium'}) : ''; }
 function cell(tr, text, cls) { const td=document.createElement('td'); td.textContent=text; if (cls) td.className=cls; tr.appendChild(td); return td; }
@@ -254,6 +266,15 @@ function render(d) {
     tip.textContent = `${t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · ${p.files} files · ${bytes(p.bytes)}`; rect.appendChild(tip);
     svg.appendChild(rect);
   });
+
+  const w = d.worker || {};
+  $('worker').textContent = w.alive ? `· worker ${w.pid}: ${w.state || ''}${w.current ? ' — ' + w.current : ''}`
+    : (w.pid ? '· worker not running (make worker-bg)' : '· no worker yet (make worker-bg)');
+  const qt = $('queue'); head(qt, [['#'], ['Status'], ['Folder'], ['Result']]);
+  if (!d.queue.length) { const tr=row(qt); cell(tr, ''); cell(tr, 'empty', 'muted'); cell(tr, 'add folders with make queue SRC=…', 's'); cell(tr, ''); }
+  d.queue.forEach(q => { const tr=row(qt); cell(tr, q.id, 's');
+    cell(tr, q.status, 'st-' + ({done:'done', failed:'error', running:'done', queued:'pending', stopped:'review'}[q.status] || ''));
+    cell(tr, q.source, 'path'); cell(tr, q.result || (q.status === 'queued' ? 'added ' + localTime(q.added_at) : ''), 's'); });
 
   const st = $('statuses'); head(st, [['Status'], ['Files','n'], ['Size','n']]);
   d.statuses.forEach(s => { const tr=row(st); cell(tr, LABEL[s.status]||s.status, 'st-'+s.status); cell(tr, num(s.files), 'n'); cell(tr, bytes(s.bytes), 'n'); });

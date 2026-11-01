@@ -237,6 +237,33 @@ def test_undeletable_source_stays_done_and_is_retried(env):
     assert not os.path.exists(photo) and rows()[photo]['error_message'] is None
 
 
+def test_queue_worker_processes_folders_in_order(env, tmp_path):
+    from photo_organizer.db import init_db
+    from photo_organizer.work_queue import add, worker
+    src, dest, go, rows = env
+    other = tmp_path / 'other'
+    make_jpeg(f"{src}/a/IMG_1.jpg", "2020:06:06 06:06:06", (1, 1, 1))
+    make_jpeg(f"{other}/b/IMG_2.jpg", "2021:07:07 07:07:07", (2, 2, 2))
+    db = str(tmp_path / 'local' / 'catalog.db')
+    conn = init_db(db)
+    assert add(conn, [str(src), str(other), str(src), str(tmp_path / 'missing')]) == [str(src), str(other)]
+    worker(conn, str(dest), db, str(tmp_path / 'STOP'), exit_when_empty=True)
+    assert files_under(dest) == ['2020/06/2020-06-06/IMG_1.jpg', '2021/07/2021-07-07/IMG_2.jpg']
+    assert [r[0] for r in conn.execute("SELECT status FROM queue ORDER BY id")] == ['done', 'done']
+    assert not src.exists() and not other.exists()
+
+
+def test_second_run_is_refused_while_one_holds_the_catalog(env, tmp_path):
+    from photo_organizer.db import RunLocked, acquire_run_lock
+    src, dest, go, _ = env
+    held = acquire_run_lock(str(tmp_path / 'local' / 'catalog.db'))
+    try:
+        with pytest.raises(RunLocked):
+            go()
+    finally:
+        os.close(held)
+
+
 def test_copy_and_hash_never_overwrites(tmp_path):
     from photo_organizer.hashing import copy_and_hash
     (tmp_path / 'a').write_bytes(b'new')
