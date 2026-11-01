@@ -2,6 +2,7 @@
 #   make run LIMIT=200
 #   make run YES=1                      # no per-batch prompts (long unattended runs)
 #   make run SOURCES="/Volumes/Photowork/Image Archive"
+#   make queue SRC="/some/backup" KEEP=1   # copy-only: never delete originals (automatic for Time Machine)
 # SOURCES is comma-separated so paths may contain spaces.
 
 SOURCES ?= /Volumes/fileshares/photos,/Volumes/fileshares/photosCleanup2026,/Volumes/Photowork
@@ -24,7 +25,7 @@ ORGANIZE = IFS=',' read -ra src <<< "$(SOURCES)"; args=(); \
 	for s in "$${src[@]}"; do args+=(--source "$$s"); done; \
 	uv run photo-organizer "$${args[@]}" --dest "$(DEST)" \
 	--db "$(CATALOG)" --limit $(LIMIT) --batch-size $(BATCH) --workers $(WORKERS) \
-	--exif-workers $(EXIF_WORKERS) --stop-file "$(STOP_FILE)" $(if $(YES),--yes)
+	--exif-workers $(EXIF_WORKERS) --stop-file "$(STOP_FILE)" $(if $(YES),--yes) $(if $(KEEP),--keep-sources)
 
 STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
@@ -63,7 +64,7 @@ run: sync | $(LOGDIR)
 
 queue: sync
 	@test -n "$(SRC)" || { echo 'usage: make queue SRC="/path/one,/path/two"'; exit 2; }
-	@IFS=',' read -ra src <<< "$(SRC)"; $(QUEUE) add "$${src[@]}"
+	@IFS=',' read -ra src <<< "$(SRC)"; $(QUEUE) add $(if $(KEEP),--keep-sources) "$${src[@]}"
 
 queue-list: sync
 	@$(QUEUE) list

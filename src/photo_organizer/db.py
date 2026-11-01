@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS queue (
     added_at TEXT DEFAULT (datetime('now')),
     started_at TEXT,
     finished_at TEXT,
-    result TEXT
+    result TEXT,
+    keep_sources INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -86,6 +87,8 @@ def init_db(db_path):
             if col not in existing:
                 conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
     conn.executescript(SCHEMA)
+    if 'keep_sources' not in {r['name'] for r in conn.execute("PRAGMA table_info(queue)")}:
+        conn.execute("ALTER TABLE queue ADD COLUMN keep_sources INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     return conn
 

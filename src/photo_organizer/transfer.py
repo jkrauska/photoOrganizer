@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import humanize
 
+from photo_organizer.constants import is_time_machine_path
 from photo_organizer.db import NOW_SQL
 from photo_organizer.hashing import copy_and_hash, sha256_file
 from photo_organizer.progress import set_progress
@@ -47,6 +48,8 @@ def _has_time_machine_deny_acl(path):
 def remove_source(path):
     """Delete a source whose bytes are verified in the store. Only the Time Machine deny ACL is
     stripped to allow this; any other permission problem is raised and the source stays."""
+    if is_time_machine_path(path):
+        raise PermissionError(f"refusing to delete inside a Time Machine backup: {path}")
     try:
         os.unlink(path)
     except PermissionError:
@@ -79,9 +82,13 @@ def retry_source_removal(conn, sources):
     return removed, len(rows)
 
 
+COPY_ONLY = 'copy-only: source kept'
+
+
 class TransferContext:
-    def __init__(self, conn):
+    def __init__(self, conn, keep_sources=False):
         self.conn = conn
+        self.keep_sources = keep_sources
         self.db_lock = threading.Lock()
         self.inflight = {}          # sha256 -> Event set when that content's first copy finishes
         self.verified = {}          # canonical dest_path -> bool (NAS re-read result this run)
@@ -110,6 +117,15 @@ def _remove_duplicate(ctx, fid, src, src_hash, canonical):
     if not ctx.canonical_ok(canonical, src_hash):
         ctx.set_status(fid, 'error', src_hash, f"canonical copy {canonical} failed verification; source kept")
         return 'error', f"canonical copy failed verification: {canonical}"
+    if ctx.keep_sources:
+        with ctx.db_lock:
+            ctx.conn.execute(
+                f"UPDATE files SET status = 'duplicate_kept', sha256 = ?, dest_path = NULL, updated_at = {NOW_SQL}, "
+                "error_message = ? WHERE id = ?",
+                (src_hash, f"duplicate of {canonical}; {COPY_ONLY}", fid),
+            )
+            ctx.conn.commit()
+        return 'duplicate_kept', None
     remove_source(src)
     with ctx.db_lock:
         # Release the planned destination name so it isn't reserved by a file that was never copied.
@@ -171,9 +187,11 @@ def _copy_verify_delete(ctx, fid, src, dst, expected):
         os.unlink(dst)
         ctx.set_status(fid, 'error', written, "copy read back from destination did not match; source kept")
         return 'error', f"destination verification failed: {dst}"
-    ctx.set_status(fid, 'done', written)
+    ctx.set_status(fid, 'done', written, COPY_ONLY if ctx.keep_sources else None)
     with ctx.verify_lock:
         ctx.verified[dst] = True
+    if ctx.keep_sources:
+        return 'done', None
     try:
         remove_source(src)
     except OSError as e:
@@ -232,7 +250,7 @@ def transfer_one(ctx, fid, src, planned):
         return 'error', f"{src}: {e}"
 
 
-def execute_transfers(conn, file_ids, workers=4, verbose=False):
+def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=False):
     """Transfer the batch's planned files. Returns {status: count}."""
     placeholders = ','.join('?' * len(file_ids))
     rows = conn.execute(
@@ -241,12 +259,12 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False):
         f"ORDER BY dest_path",
         file_ids,
     ).fetchall()
-    counts = {'done': 0, 'duplicate_removed': 0, 'source_kept': 0, 'error': 0}
+    counts = {'done': 0, 'duplicate_removed': 0, 'duplicate_kept': 0, 'source_kept': 0, 'error': 0}
     if not rows:
         print("  No files to transfer.")
         return counts
 
-    ctx = TransferContext(conn)
+    ctx = TransferContext(conn, keep_sources)
     total = len(rows)
     total_bytes = sum(r['file_size'] or 0 for r in rows)
     bytes_done = completed = 0

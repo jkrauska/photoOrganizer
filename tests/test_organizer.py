@@ -409,3 +409,39 @@ def test_parse_exif_datetime_keeps_offset():
 def test_dirpath_needs_full_date():
     assert date_from_dirpath("/s/2019/03/x.jpg", "/s") is None
     assert str(date_from_dirpath("/s/2019/2019-03-05/x.jpg", "/s")) == "2019-03-05"
+
+
+def test_copy_only_keeps_sources_and_records_duplicates(env):
+    src, dest, go, rows = env
+    a = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:08:08 08:08:08", (8, 8, 8))
+    os.makedirs(src / 'b')
+    b = shutil.copy2(a, src / 'b' / 'IMG_1.jpg')
+    go(keep_sources=True)
+    assert files_under(dest) == ['2020/08/2020-08-08/IMG_1.jpg']
+    assert os.path.exists(a) and os.path.exists(b), "copy-only never deletes"
+    assert sorted(r['status'] for r in rows().values()) == ['done', 'duplicate_kept']
+
+
+def test_time_machine_paths_are_always_copy_only(env, tmp_path):
+    from photo_organizer.transfer import remove_source
+    src, dest, go, rows = env
+    tm = tmp_path / 'TM' / 'Backups.backupdb' / 'mbp' / '2015-08-06' / 'Desktop'
+    photo = make_jpeg(f"{tm}/2015-07-04/IMG_9.jpg", "2015:07:04 12:00:00", (4, 7, 4))
+    go(sources=[tm])                          # keep_sources not requested
+    assert files_under(dest) == ['2015/07/2015-07-04/IMG_9.jpg']
+    assert os.path.exists(photo), "nothing inside a Time Machine backup is deleted"
+    with pytest.raises(PermissionError):
+        remove_source(photo)
+
+
+def test_queue_marks_time_machine_folders_copy_only(tmp_path):
+    from photo_organizer.db import init_db
+    from photo_organizer.work_queue import enqueue
+    tm = tmp_path / 'Backups.backupdb' / 'x'
+    tm.mkdir(parents=True)
+    plain = tmp_path / 'plain'
+    plain.mkdir()
+    conn = init_db(str(tmp_path / 'c.db'))
+    enqueue(conn, str(tm))
+    enqueue(conn, str(plain))
+    assert [r[0] for r in conn.execute("SELECT keep_sources FROM queue ORDER BY id")] == [1, 0]

@@ -129,7 +129,7 @@ def snapshot(db_path):
         worker['alive'] = bool(worker) and not worker.get('stopped') and _pid_alive(worker.get('pid'))
         try:
             queue = [dict(r) for r in conn.execute(
-                "SELECT id, status, source, added_at, finished_at, result FROM queue ORDER BY "
+                "SELECT id, status, source, added_at, finished_at, result, keep_sources FROM queue ORDER BY "
                 "CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, "
                 "CASE status WHEN 'queued' THEN id ELSE -id END LIMIT 20")]
         except sqlite3.OperationalError:
@@ -209,6 +209,7 @@ svg { width:100%; height:90px; display:block; }
   <form id="qform" class="qform" autocomplete="off">
     <input id="qpath" list="qdirs" placeholder="/Volumes/Photowork/Masters — type a path; subfolders are suggested" spellcheck="false">
     <datalist id="qdirs"></datalist>
+    <label class="s" title="Verify copies into the store but never delete the originals (always on for Time Machine backups)"><input type="checkbox" id="qkeep"> copy only (keep originals)</label>
     <button type="submit">Add to queue</button>
     <span id="qmsg" class="s"></span>
   </form>
@@ -225,7 +226,7 @@ svg { width:100%; height:90px; display:block; }
 <p class="s" id="meta"></p>
 </main>
 <script>
-const LABEL = {done:'moved', duplicate_removed:'duplicate removed', pending:'pending', review:'left: no date',
+const LABEL = {done:'moved', duplicate_removed:'duplicate removed', duplicate_kept:'duplicate (kept)', pending:'pending', review:'left: no date',
                ignored:'left: unhandled type', error:'left: error', copying:'copying'};
 const $ = id => document.getElementById(id);
 const num = n => (n ?? 0).toLocaleString();
@@ -294,7 +295,7 @@ function render(d) {
   if (!d.queue.length) { const tr=row(qt); cell(tr, ''); cell(tr, 'empty', 'muted'); cell(tr, 'add a folder above', 's'); cell(tr, ''); cell(tr, ''); }
   d.queue.forEach(q => { const tr=row(qt); cell(tr, q.id, 's');
     cell(tr, q.status, 'st-' + ({done:'done', failed:'error', running:'done', queued:'pending', stopped:'review'}[q.status] || ''));
-    cell(tr, q.source, 'path'); cell(tr, q.result || (q.status === 'queued' ? 'added ' + localTime(q.added_at) : ''), 's');
+    cell(tr, q.source + (q.keep_sources ? '  [copy-only]' : ''), 'path'); cell(tr, q.result || (q.status === 'queued' ? 'added ' + localTime(q.added_at) : ''), 's');
     const td = cell(tr, '');
     if (q.status === 'queued') { const b = document.createElement('button'); b.className = 'qbtn'; b.textContent = 'Remove';
       b.onclick = async () => { const r = await (await fetch('/api/queue/' + q.id, {method:'DELETE'})).json(); qmsg(r); tick(); };
@@ -345,7 +346,7 @@ $('qform').addEventListener('submit', async ev => {
   ev.preventDefault();
   const path = $('qpath').value.trim(); if (!path) return;
   const r = await (await fetch('/api/queue', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({path})})).json();
+    body: JSON.stringify({path, keep_sources: $('qkeep').checked})})).json();
   qmsg(r); if (r.ok) $('qpath').value = ''; tick();
 });
 tick(); setInterval(tick, 2000);
@@ -432,14 +433,15 @@ def make_handler(db_path, port):
                 return self.send_error(403)
             try:
                 length = min(int(self.headers.get('Content-Length', 0)), 65536)
-                path = json.loads(self.rfile.read(length) or b'{}').get('path', '')
+                payload = json.loads(self.rfile.read(length) or b'{}')
+                path, keep = payload.get('path', ''), bool(payload.get('keep_sources'))
             except (ValueError, AttributeError):
                 return self._send(400, {'ok': False, 'message': 'bad request'})
             if not isinstance(path, str) or not path.strip():
                 return self._send(400, {'ok': False, 'message': 'enter a folder path'})
             conn = init_db(db_path)
             try:
-                queued, message = enqueue(conn, path, _queue_dest(db_path))
+                queued, message = enqueue(conn, path, _queue_dest(db_path), keep)
             finally:
                 conn.close()
             return self._send(200 if queued else 400, {'ok': bool(queued), 'message': message})

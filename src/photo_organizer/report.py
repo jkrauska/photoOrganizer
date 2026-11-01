@@ -6,6 +6,7 @@ import humanize
 STATUS_LABELS = {
     'done': 'moved into store',
     'duplicate_removed': 'duplicate, source removed',
+    'duplicate_kept': 'duplicate, source kept (copy-only)',
     'pending': 'pending',
     'review': 'LEFT IN PLACE: no reliable date',
     'ignored': 'LEFT IN PLACE: unhandled type',

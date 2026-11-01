@@ -8,6 +8,7 @@ import time
 import humanize
 
 from photo_organizer.cleanup import prune_empty_dirs
+from photo_organizer.constants import is_time_machine_path
 from photo_organizer.dates import DEFAULT_EXIF_WORKERS, require_exiftool
 from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, acquire_run_lock, backup_db, init_db
 from photo_organizer.planner import plan_destinations
@@ -24,9 +25,11 @@ def ts():
 
 def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit=0,
         verbose=False, confirm=lambda prompt: True, exif_workers=DEFAULT_EXIF_WORKERS,
-        stop_file=DEFAULT_STOP_FILE):
+        stop_file=DEFAULT_STOP_FILE, keep_sources=False):
     """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals,
     with 'stopped' set when a stop was requested. Raises RunLocked if another run holds the catalog."""
+    # Backups are imported copy-only, whatever was asked.
+    keep_sources = keep_sources or any(is_time_machine_path(s) for s in sources)
     lock_fd = acquire_run_lock(db_path)
     configure_stop_file(stop_file)
     conn = init_db(db_path)
@@ -36,7 +39,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         recovered = recover_interrupted(conn)
         if recovered:
             print(f"Recovered {recovered:,} files interrupted mid-transfer")
-        if execute:
+        if execute and not keep_sources:
             removed, kept = retry_source_removal(conn, sources)
             if kept:
                 print(f"Removed {removed:,} of {kept:,} sources left behind by earlier failed deletes")
@@ -44,7 +47,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         known = {r[0] for r in conn.execute("SELECT original_path FROM files")}
         file_iter = iter_source_files(sources, dest, known)
         prior = PriorCatalogs()
-        totals = {'done': 0, 'duplicate_removed': 0, 'source_kept': 0, 'error': 0, 'review': 0}
+        totals = {'done': 0, 'duplicate_removed': 0, 'duplicate_kept': 0, 'source_kept': 0, 'error': 0, 'review': 0}
         processed = 0
         batch_num = 0
 
@@ -81,23 +84,29 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
                     f"AND id IN ({','.join('?' * len(batch_ids))})", batch_ids,
                 ).fetchone()[0] or 0
                 set_progress(conn, phase='waiting for confirmation')
-                if not confirm(f"\n[{ts()}] Move {len(batch_ids) - review:,} files "
-                               f"({humanize.naturalsize(size)}) and delete sources? [y/N] "):
+                action = "Copy (sources kept)" if keep_sources else "Move"
+                tail = "" if keep_sources else " and delete sources"
+                if not confirm(f"\n[{ts()}] {action} {len(batch_ids) - review:,} files "
+                               f"({humanize.naturalsize(size)}){tail}? [y/N] "):
                     print("Aborted.")
                     break
-                counts = execute_transfers(conn, batch_ids, workers, verbose)
+                counts = execute_transfers(conn, batch_ids, workers, verbose, keep_sources)
                 for k, v in counts.items():
                     totals[k] += v
-                print(f"  Batch {batch_num}: {counts['done']:,} moved | "
-                      f"{counts['duplicate_removed']:,} duplicates removed | "
-                      f"{counts['source_kept']:,} sources not removable | {counts['error']:,} errors")
+                if keep_sources:
+                    print(f"  Batch {batch_num}: {counts['done']:,} copied | "
+                          f"{counts['duplicate_kept']:,} already in store | {counts['error']:,} errors")
+                else:
+                    print(f"  Batch {batch_num}: {counts['done']:,} moved | "
+                          f"{counts['duplicate_removed']:,} duplicates removed | "
+                          f"{counts['source_kept']:,} sources not removable | {counts['error']:,} errors")
                 backup_db(conn, dest)
 
             if exhausted:
                 break
 
         stopped = shutdown_requested()
-        if execute and not stopped:
+        if execute and not stopped and not keep_sources:
             set_progress(conn, phase='pruning empty folders')
             pruned = sum(prune_empty_dirs(s, verbose) for s in sources)
             print(f"\nRemoved {pruned:,} emptied source folders")
@@ -109,6 +118,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
             print(f"Catalog backed up to {backup_db(conn, dest)}")
         print_report(conn, dry_run=not execute)
         totals['stopped'] = stopped
+        totals['keep_sources'] = keep_sources
         return totals
     finally:
         try:
@@ -132,6 +142,9 @@ def main():
     parser.add_argument('--execute', action='store_true',
                         help='Actually move files and delete sources (default is dry-run)')
     parser.add_argument('--yes', action='store_true', help='Skip confirmation prompts')
+    parser.add_argument('--keep-sources', action='store_true',
+                        help='Copy-only: verify copies but never delete or prune sources '
+                             '(always on for Time Machine backups)')
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--limit', type=int, default=0, help='Process at most N files (0 = no limit)')
     parser.add_argument('--batch-size', type=int, default=5000)
@@ -154,7 +167,9 @@ def main():
     if any(is_within(os.path.abspath(args.db), s) for s in sources):
         sys.exit("Error: the catalog must not live inside a source directory")
 
-    print(f"Photo Organizer [{'EXECUTE: sources are DELETED after verified copy' if args.execute else 'DRY RUN'}]")
+    keep = args.keep_sources or any(is_time_machine_path(s) for s in sources)
+    mode = ('EXECUTE: copy-only, sources kept' if keep else 'EXECUTE: sources are DELETED after verified copy')
+    print(f"Photo Organizer [{mode if args.execute else 'DRY RUN'}]")
     for s in sources:
         print(f"  Source: {s}")
     print(f"  Dest:   {dest}")
@@ -174,7 +189,7 @@ def main():
     start = time.time()
     try:
         run(sources, dest, args.db, args.execute, args.batch_size, args.workers, args.limit,
-            args.verbose, confirm, args.exif_workers, args.stop_file)
+            args.verbose, confirm, args.exif_workers, args.stop_file, args.keep_sources)
     except RunLocked as e:
         sys.exit(f"Error: {e}. Wait for it to finish, or add this folder to the queue (make queue SRC=...).")
     print(f"\nTotal time: {humanize.naturaldelta(time.time() - start)}")

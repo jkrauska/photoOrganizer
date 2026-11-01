@@ -39,5 +39,14 @@ FILENAME_PATTERNS = [
     re.compile(r'(\d{4})-(\d{2})-(\d{2})'),
 ]
 
+# Backups are imported copy-only: nothing inside them is ever deleted (HFS Backups.backupdb,
+# APFS snapshot mounts under /Volumes/.timemachine, and network backup bundles).
+TIME_MACHINE_MARKERS = ('/Backups.backupdb/', '/.timemachine/', '.backupbundle/', '.sparsebundle/')
+
+
+def is_time_machine_path(path):
+    return any(m in path.rstrip('/') + '/' for m in TIME_MACHINE_MARKERS)
+
+
 # Name of the catalog a previous run of this tool left at the root of its destination.
 PRIOR_CATALOG_NAME = 'photo_organizer.db'

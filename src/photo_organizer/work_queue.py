@@ -21,6 +21,7 @@ import time
 from photo_organizer.cli import run
 from photo_organizer.dates import DEFAULT_EXIF_WORKERS, require_exiftool
 from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, init_db
+from photo_organizer.constants import is_time_machine_path
 from photo_organizer.scanner import is_within
 from photo_organizer.state import DEFAULT_STOP_FILE, shutdown_requested, signal_handler
 
@@ -39,8 +40,8 @@ def _pid_alive(pid):
         return False
 
 
-def enqueue(conn, path, dest=None):
-    """Queue one folder. Returns (queued_path_or_None, message)."""
+def enqueue(conn, path, dest=None, keep_sources=False):
+    """Queue one folder (copy-only if keep_sources, always for backups). Returns (queued_path_or_None, message)."""
     src = os.path.abspath(os.path.expanduser(path.strip())).rstrip('/') or '/'
     if not os.path.isdir(src):
         return None, f"not a folder: {src}"
@@ -49,15 +50,16 @@ def enqueue(conn, path, dest=None):
     if conn.execute("SELECT 1 FROM queue WHERE source = ? AND status IN ('queued', 'running')",
                     (src,)).fetchone():
         return None, f"already queued: {src}"
-    conn.execute("INSERT INTO queue (source) VALUES (?)", (src,))
+    keep = bool(keep_sources or is_time_machine_path(src))
+    conn.execute("INSERT INTO queue (source, keep_sources) VALUES (?, ?)", (src, int(keep)))
     conn.commit()
-    return src, f"queued: {src}"
+    return src, f"queued{' (copy-only)' if keep else ''}: {src}"
 
 
-def add(conn, paths, dest=None):
+def add(conn, paths, dest=None, keep_sources=False):
     added = []
     for p in paths:
-        src, msg = enqueue(conn, p, dest)
+        src, msg = enqueue(conn, p, dest, keep_sources)
         print(f"  {msg}")
         if src:
             added.append(src)
@@ -66,11 +68,12 @@ def add(conn, paths, dest=None):
 
 def list_queue(conn, limit=30):
     rows = conn.execute(
-        "SELECT id, status, source, added_at, finished_at, result FROM queue ORDER BY "
+        "SELECT id, status, source, added_at, finished_at, result, keep_sources FROM queue ORDER BY "
         "CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?", (limit,)
     ).fetchall()
     for r in rows:
-        print(f"  #{r['id']:<4} {r['status']:<8} {r['source']}" + (f"  ({r['result']})" if r['result'] else ''))
+        tag = ' [copy-only]' if r['keep_sources'] else ''
+        print(f"  #{r['id']:<4} {r['status']:<8} {r['source']}{tag}" + (f"  ({r['result']})" if r['result'] else ''))
     if not rows:
         print("  (empty)")
 
@@ -90,7 +93,10 @@ def _other_run_active(conn):
 
 
 def _summary(totals):
-    parts = [f"{totals.get('done', 0):,} moved", f"{totals.get('duplicate_removed', 0):,} duplicates removed"]
+    if totals.get('duplicate_kept') or totals.get('keep_sources'):
+        parts = [f"{totals.get('done', 0):,} copied", f"{totals.get('duplicate_kept', 0):,} already in store"]
+    else:
+        parts = [f"{totals.get('done', 0):,} moved", f"{totals.get('duplicate_removed', 0):,} duplicates removed"]
     for key, label in (('review', 'left: no date'), ('source_kept', 'sources not removable'), ('error', 'errors')):
         if totals.get(key):
             parts.append(f"{totals[key]:,} {label}")
@@ -108,7 +114,8 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
                 os.unlink(stop_file)
             print("Stop requested; worker exiting.")
             break
-        item = conn.execute("SELECT id, source FROM queue WHERE status = 'queued' ORDER BY id LIMIT 1").fetchone()
+        item = conn.execute(
+            "SELECT id, source, keep_sources FROM queue WHERE status = 'queued' ORDER BY id LIMIT 1").fetchone()
         if item is None:
             if exit_when_empty:
                 break
@@ -133,7 +140,8 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
         _set_worker_state(conn, state='running', current=item['source'], item=item['id'])
         print(f"\n=== Queue #{item['id']}: {item['source']} ===")
         try:
-            totals = run([item['source']], dest, db_path, execute=True, stop_file=stop_file, **run_kwargs)
+            totals = run([item['source']], dest, db_path, execute=True, stop_file=stop_file,
+                         keep_sources=bool(item['keep_sources']), **run_kwargs)
         except RunLocked:
             conn.execute("UPDATE queue SET status = 'queued' WHERE id = ?", (item['id'],))
             conn.commit()
@@ -165,6 +173,8 @@ def main():
     sub = parser.add_subparsers(dest='cmd', required=True)
     p_add = sub.add_parser('add')
     p_add.add_argument('paths', nargs='+')
+    p_add.add_argument('--keep-sources', action='store_true',
+                       help='Copy-only: never delete the originals (always on for Time Machine backups)')
     sub.add_parser('list')
     p_rm = sub.add_parser('remove')
     p_rm.add_argument('id', type=int)
@@ -179,7 +189,7 @@ def main():
 
     conn = init_db(args.db)
     if args.cmd == 'add':
-        add(conn, args.paths)
+        add(conn, args.paths, keep_sources=args.keep_sources)
         list_queue(conn)
     elif args.cmd == 'list':
         list_queue(conn)
