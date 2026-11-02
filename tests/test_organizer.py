@@ -962,6 +962,10 @@ def test_ark_day_browser_searches_summaries_and_captions_and_opens_only_known_da
     assert client.post('/api/open', json={'day': '/etc'}).status_code == 404
     assert client.post('/api/open', json={'day': '/x/2011/01/2011-01-02'}).status_code == 404   # not mounted
     assert client.get('/').status_code == 200
+    assert client.post('/api/wrong', json={'day': str(day), 'note': 'St. Louis'}).status_code == 200
+    assert client.post('/api/wrong', json={'day': '/nope'}).status_code == 404
+    beach = client.get('/api/days', params={'q': 'surf'}).json()['items'][0]
+    assert beach['wrong_at'] and beach['wrong_note'] == 'St. Louis'
 
 
 def test_ark_faces_cluster_detail_lists_unnamed_faces_before_named_ones(tmp_path):
@@ -970,3 +974,38 @@ def test_ark_faces_cluster_detail_lists_unnamed_faces_before_named_ones(tmp_path
     ark_faces.name_faces(conn, [1], 'Zed')
     ark_faces.name_faces(conn, [3], 'Amy')
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0')] == [2, 3, 1]
+
+
+def test_ark_days_marked_wrong_are_redone_first_with_more_frames_and_the_note(tmp_path):
+    from datetime import datetime, timedelta
+    from photo_organizer.analysis import ark, days
+    t0 = datetime(2018, 9, 22, 13, 0)
+    d = tmp_path / '2018-09-22'
+    d.mkdir()
+    items = []
+    for i in range(40):                                       # one 2.6-hour burst
+        p = d / f'{i}.jpg'
+        Image.new('RGB', (8, 8), (i, 0, 0)).save(p)
+        items.append((f'g{i}', str(p), t0 + timedelta(minutes=4 * i)))
+    found = {str(d): items}
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    prompts = []
+    vlm = lambda path: {'caption': 'a ballpark'}
+
+    def summary(prompt):
+        prompts.append(prompt)
+        return {'title': f'Game {len(prompts)}', 'summary': 'At a ballgame.'}
+
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None) == 1
+    first = conn.execute("SELECT bursts FROM days").fetchone()[0]
+    assert len(json.loads(first)[0]['samples']) == 6          # 3 per two hours
+    assert 'several descriptions agree' in prompts[0] and 'marked wrong' not in prompts[0]
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None) == 0
+    assert days.mark_wrong(conn, str(d), 'Busch Stadium, St. Louis')
+    assert not days.mark_wrong(conn, '/elsewhere')
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None) == 1
+    assert '"Game 1: At a ballgame."' in prompts[1] and 'Busch Stadium, St. Louis' in prompts[1]
+    row = conn.execute("SELECT * FROM days").fetchone()
+    assert row['title'] == 'Game 2' and row['attempt'] == 1 and row['wrong_at'] is None
+    assert row['wrong_note'] == 'Busch Stadium, St. Louis' and row['prev_summary'] == 'Game 1: At a ballgame.'
+    assert len(json.loads(row['bursts'])[0]['samples']) == 12   # twice the frames on a redo

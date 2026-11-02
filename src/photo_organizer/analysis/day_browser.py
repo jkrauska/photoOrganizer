@@ -6,6 +6,8 @@ Then:  http://127.0.0.1:8079/
 Search matches every word against the day's title, summary, keywords, setting, event type,
 names and folder, and against the captions of the day's sampled photos. "Open folder" opens the
 day folder in Finder; it binds 127.0.0.1 only and opens only folders listed in the days table.
+"This is wrong" queues the day for re-analysis with more frames (days.mark_wrong); the running
+photo-ark-analyze days job picks it up before its next day.
 """
 
 import argparse
@@ -24,7 +26,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
-from photo_organizer.analysis.ark import DEFAULT_ANALYSIS_DB, load_image
+from photo_organizer.analysis import days as days_mod
+from photo_organizer.analysis.ark import DEFAULT_ANALYSIS_DB, load_image, open_db
 
 THUMB_SIDE = 360
 PHOTO_SIDE = 1800
@@ -75,6 +78,7 @@ def search_days(conn, q='', year=None, order='newest', limit=60, offset=0):
             'summary': r['summary'] or (r['vlm_raw'] or '')[:300], 'event_type': r['event_type'],
             'setting': r['setting'], 'keywords': json.loads(r['keywords'] or '[]'),
             'people': json.loads(r['people'] or '[]'),
+            'wrong_at': r['wrong_at'], 'wrong_note': r['wrong_note'], 'attempt': r['attempt'] or 0,
             'bursts': [{'start': b['start'], 'end': b['end'], 'n': b['n'],
                         'samples': [{'sha': s, 'caption': caps.get(s)} for s in b['samples']]}
                        for b in bursts]})
@@ -94,6 +98,11 @@ def _jpeg(path, side):
     return buf.getvalue()
 
 
+class WrongIn(BaseModel):
+    day: str
+    note: str = ''
+
+
 class OpenIn(BaseModel):
     day: str
     sha: str | None = None
@@ -101,6 +110,8 @@ class OpenIn(BaseModel):
 
 def make_app(db_path, thumb_dir, opener=None):
     """opener(args) runs `open` (tests pass a fake)."""
+    with closing(open_db(db_path)) as rw:
+        days_mod.init(rw)               # the redo columns, on a DB from before they existed
     conn = connect(db_path)
     thumb_dir = Path(thumb_dir)
     opener = opener or (lambda args: subprocess.run(['open', *args], check=False))
@@ -136,6 +147,13 @@ def make_app(db_path, thumb_dir, opener=None):
     @app.get("/photo/{sha}.jpg")
     def photo(sha: str):
         return Response(_jpeg(image_path(sha), PHOTO_SIDE), media_type='image/jpeg')
+
+    @app.post("/api/wrong")
+    def wrong(body: WrongIn):
+        with closing(open_db(db_path)) as rw:
+            if not days_mod.mark_wrong(rw, body.day, body.note):
+                raise HTTPException(404)
+        return {'ok': True}
 
     @app.post("/api/open")
     def open_folder(body: OpenIn):
@@ -192,6 +210,9 @@ main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:14px; }
 .thumbs { display:flex; gap:6px; }
 .thumbs img { height:96px; border-radius:6px; cursor:zoom-in; background:var(--line); }
 .path { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
+.badge { font-size:12px; padding:2px 8px; border-radius:999px; background:#f6d38a; color:#3a2a00; }
+.badge.redone { background:var(--chip); color:var(--muted); }
+button.wrong { border-color:#c4542d; color:#c4542d; }
 .path code { font-size:12px; color:var(--muted); word-break:break-all; }
 button.open { font:inherit; font-size:13px; padding:4px 10px; border-radius:8px; border:1px solid var(--accent);
   background:transparent; color:var(--accent); cursor:pointer; }
@@ -213,7 +234,7 @@ button.open { font:inherit; font-size:13px; padding:4px 10px; border-radius:8px;
 <main id="list"></main>
 <div id="viewer"><img id="vimg" alt=""><p id="vcap"></p>
   <div class="bar"><button class="open" id="vreveal">Show in Finder</button>
-  <button class="open" id="vclose">Close (Esc)</button></div></div>
+  <button class="open" id="vclose">Close (Esc) · ← → step</button></div></div>
 <script>
 const $ = s => document.querySelector(s);
 let offset = 0, total = 0, timer, viewing = null;
@@ -241,8 +262,11 @@ function card(d) {
   return `<article class="day"><div class="top"><span class="date">${esc(d.date)}</span>
     <span class="title">${esc(d.title || '(untitled)')}</span>
     <span class="meta">${d.n_images} photos${d.event_type ? ' · ' + esc(d.event_type) : ''}${d.setting ? ' · ' + esc(d.setting) : ''}</span></div>
+    ${d.wrong_at ? `<span class="badge">Queued for re-analysis${d.wrong_note ? ': ' + esc(d.wrong_note) : ''}</span>`
+      : d.attempt ? `<span class="badge redone">Re-analyzed${d.wrong_note ? ' after: ' + esc(d.wrong_note) : ''}</span>` : ''}
     <div class="summary">${esc(d.summary)}</div><div class="chips">${chips}</div><div class="bursts">${bursts}</div>
-    <div class="path"><button class="open" data-open="${esc(d.day)}">Open folder</button><code>${esc(d.day)}</code></div></article>`;
+    <div class="path"><button class="open" data-open="${esc(d.day)}">Open folder</button>
+    ${d.wrong_at ? '' : `<button class="open wrong" data-wrong="${esc(d.day)}">This is wrong</button>`}<code>${esc(d.day)}</code></div></article>`;
 }
 
 async function openIn(day, sha) {
@@ -251,18 +275,48 @@ async function openIn(day, sha) {
   if (!r.ok) alert((await r.json()).detail || 'Could not open it');
 }
 
+async function markWrong(btn) {
+  const note = prompt('What is wrong? (optional, e.g. "St. Louis, not San Francisco")\\n' +
+                      'The day will be re-analyzed with more photos.');
+  if (note === null) return;
+  const r = await fetch('/api/wrong', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                       body: JSON.stringify({day: btn.dataset.wrong, note})});
+  if (!r.ok) { alert('Could not mark it'); return; }
+  btn.insertAdjacentHTML('afterend', `<span class="badge">Queued for re-analysis${note ? ': ' + esc(note) : ''}</span>`);
+  btn.remove();
+}
+
 document.addEventListener('click', e => {
   const t = e.target;
   if (t.id == 'more') load(false);
   else if (t.dataset.open) openIn(t.dataset.open);
+  else if (t.dataset.wrong) markWrong(t);
   else if (t.dataset.q) { $('#q').value = t.dataset.q; load(true); window.scrollTo(0, 0); }
-  else if (t.dataset.sha) {
-    viewing = t.dataset; $('#vimg').src = `/photo/${t.dataset.sha}.jpg`; $('#vcap').textContent = t.dataset.cap;
-    $('#viewer').style.display = 'flex';
-  } else if (t.id == 'vreveal') openIn(viewing.day, viewing.sha);
+  else if (t.dataset.sha) show(t);
+  else if (t.id == 'vreveal') openIn(viewing.dataset.day, viewing.dataset.sha);
   else if (t.id == 'vclose' || t.id == 'viewer') $('#viewer').style.display = 'none';
 });
-document.addEventListener('keydown', e => { if (e.key == 'Escape') $('#viewer').style.display = 'none'; });
+// The viewer steps through every sample photo on the page with the arrow keys, across days.
+function show(img) {
+  viewing = img;
+  const d = img.closest('.day');
+  $('#vimg').src = `/photo/${img.dataset.sha}.jpg`;
+  $('#vcap').textContent = `${d.querySelector('.date').textContent} · ${d.querySelector('.title').textContent}` +
+    (img.dataset.cap ? ` — ${img.dataset.cap}` : '');
+  $('#viewer').style.display = 'flex';
+}
+function step(by) {
+  const all = [...document.querySelectorAll('.thumbs img')];
+  const next = all[all.indexOf(viewing) + by];
+  if (next) { show(next); next.scrollIntoView({block: 'nearest'}); }
+  else if (by > 0 && offset < total) load(false).then(() => step(by));
+}
+document.addEventListener('keydown', e => {
+  if ($('#viewer').style.display != 'flex') return;
+  if (e.key == 'Escape') $('#viewer').style.display = 'none';
+  else if (e.key == 'ArrowRight') { e.preventDefault(); step(1); }
+  else if (e.key == 'ArrowLeft') { e.preventDefault(); step(-1); }
+});
 $('#q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => load(true), 250); });
 $('#year').addEventListener('change', () => load(true));
 $('#order').addEventListener('change', () => load(true));
