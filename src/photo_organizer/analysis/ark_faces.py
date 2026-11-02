@@ -165,8 +165,9 @@ def _crop_path(crop_dir, r):
     return Path(crop_dir) / f"{r['sha256']}_{r['face_idx']}_{x1}_{y1}_{x2}_{y2}.jpg"
 
 
-def full_image(conn, face_id, max_side=FULL_MAX_SIDE):
-    """JPEG bytes of the whole photo a face is in (EXIF-oriented, scaled down), with the face boxed."""
+def full_image(conn, face_id, max_side=FULL_MAX_SIDE, box=True):
+    """JPEG bytes of the whole photo a face is in (EXIF-oriented, scaled down), with the face boxed
+    unless box is False."""
     r = conn.execute("SELECT f.x1, f.y1, f.x2, f.y2, i.path FROM faces f JOIN images i ON i.sha256 = f.sha256 "
                      "WHERE f.id = ?", (face_id,)).fetchone()
     if r is None:
@@ -175,8 +176,9 @@ def full_image(conn, face_id, max_side=FULL_MAX_SIDE):
     scale = min(1.0, max_side / max(img.size))
     if scale < 1:
         img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
-    box = [v * scale for v in (r['x1'], r['y1'], r['x2'], r['y2'])]
-    ImageDraw.Draw(img).rectangle(box, outline=(255, 210, 0), width=max(3, img.width // 300))
+    if box:
+        xy = [v * scale for v in (r['x1'], r['y1'], r['x2'], r['y2'])]
+        ImageDraw.Draw(img).rectangle(xy, outline=(255, 210, 0), width=max(3, img.width // 300))
     buf = io.BytesIO()
     img.save(buf, 'JPEG', quality=88)
     return buf.getvalue()

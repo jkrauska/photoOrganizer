@@ -435,10 +435,10 @@ def make_ark_app(db_path, crop_dir) -> FastAPI:
         return FileResponse(path, media_type="image/jpeg")
 
     @ark.get("/photo/{face_id}.jpg")
-    def photo(face_id: int):
+    def photo(face_id: int, box: bool = True):
         with db() as conn:
             try:
-                data = ark_faces.full_image(conn, face_id)
+                data = ark_faces.full_image(conn, face_id, box=box)
             except KeyError:
                 raise HTTPException(404, "face not found")
             except Exception as e:
@@ -548,7 +548,7 @@ ARK_HTML = r"""<!doctype html>
   </div>
   <div id="list"><div class="empty">Loading…</div></div>
 </div>
-<div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li><li>Double-click a crop to see the whole photo; ← → step through the group's photos, Esc or click closes.</li><li>Strangers or false detections: ✕ on a crop forgets it; click crops to select several, then <b>Forget selected</b>. Forgotten faces are deleted from the database.</li></ol></div></div>
+<div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li><li>Double-click a crop to see the whole photo; ← → step through the group's photos, b hides or shows the face box, Esc or click closes.</li><li>Strangers or false detections: ✕ on a crop forgets it; click crops to select several, then <b>Forget selected</b>. Forgotten faces are deleted from the database.</li></ol></div></div>
 <script>
 let clusters = [];
 let currentId = null;
@@ -679,6 +679,9 @@ async function loadFaces() {
 }
 
 let viewerId = null;
+let viewerBox = true;
+
+const photoUrl = id => `/photo/${id}.jpg${viewerBox ? '' : '?box=0'}`;
 
 function openViewer(id, fromDblClick = true) {
   const f = faces.find(x => x.id === id);
@@ -689,13 +692,13 @@ function openViewer(id, fromDblClick = true) {
   }
   viewerId = id;
   const v = document.getElementById('viewer');
-  v.querySelector('img').src = `/photo/${id}.jpg`;
+  v.querySelector('img').src = photoUrl(id);
   const pos = faces.findIndex(x => x.id === id);
   v.querySelector('div').textContent = (f ? f.path : '') +
-    (pos >= 0 ? `  ·  ${pos + 1} of ${faces.length}  ·  ← → to move, Esc to close` : '');
+    (pos >= 0 ? `  ·  ${pos + 1} of ${faces.length}  ·  ← → to move, b box ${viewerBox ? 'off' : 'on'}, Esc to close` : '');
   v.classList.add('open');
   // Warm the next photo so arrowing forward is quick.
-  if (pos >= 0 && pos + 1 < faces.length) new Image().src = `/photo/${faces[pos + 1].id}.jpg`;
+  if (pos >= 0 && pos + 1 < faces.length) new Image().src = photoUrl(faces[pos + 1].id);
 }
 
 function stepViewer(delta) {
@@ -716,6 +719,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeViewer();
   else if (e.key === 'ArrowRight') { e.preventDefault(); stepViewer(1); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); stepViewer(-1); }
+  else if (e.key === 'b' || e.key === 'B') { viewerBox = !viewerBox; openViewer(viewerId, false); }
 });
 
 let guess = null;
