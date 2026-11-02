@@ -232,7 +232,7 @@ let pace = +(localStorage.getItem('shuffle-pace') || 8000);   // ms each photo s
 let playing = true, timer = null, due = 0, left = 0;
 let history = [], at = -1;             // photos shown; at = the one on screen
 const ahead = [];                      // prefetched random photos, decoded and ready
-let front = 0, anim = null, busy = false;
+let front = 0, anim = null, busy = false, queued = 0;   // queued: arrow presses made while loading
 let autoAt = 0, outgoing = null;   // when the timer last changed photo, and the photo it faded out
 
 async function fetchRandom() {
@@ -256,7 +256,7 @@ let filling = false;
 async function fill() {
   if (filling) return;
   filling = true;
-  try { while (ahead.length < 2) { const p = await fetchRandom(); if (!p) break; ahead.push(p); } }
+  try { while (ahead.length < 4) { const p = await fetchRandom(); if (!p) break; ahead.push(p); } }
   finally { filling = false; }
 }
 
@@ -321,7 +321,7 @@ function schedule(ms) {
   timer = setTimeout(() => step(1, true), ms);
 }
 async function step(by, auto) {
-  if (busy) return;
+  if (busy) { if (!auto) queued += by; return; }
   busy = true;
   const was = history[at];
   try {
@@ -343,7 +343,10 @@ async function step(by, auto) {
     autoAt = auto ? Date.now() : 0; outgoing = was;
     show(history[at]);
     schedule(pace + FADE);
-  } finally { busy = false; }
+  } finally {
+    busy = false;
+    if (queued) { const q = Math.sign(queued); queued -= q; step(q); }
+  }
 }
 function toggle() {
   playing = !playing;
