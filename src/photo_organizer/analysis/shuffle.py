@@ -4,9 +4,9 @@ Run:   make ark-shuffle-ui   (or: uv run photo-shuffle)
 Then:  http://127.0.0.1:8080/
 
 Random stored photos (catalog files with status 'done', no videos) fade in with a slow pan/zoom.
-Space plays/pauses, ← → step back through the history and forward, 1–5 score the photo on screen,
-0 clears its score, + / - change the pace, F goes full screen. The bottom overlay shows when the
-photo was taken and Gemma's caption from analysis.db when there is one.
+Space plays/pauses, ← → step back through the history and forward, 1–5 score the photo on screen
+and move on to the next one, 0 clears its score, + / - change the pace, F goes full screen. The
+bottom overlay shows when the photo was taken and Gemma's caption from analysis.db when there is one.
 
 Scores are kept in analysis.db, table photo_scores (one row per sha256; a new score replaces the
 old one), e.g. the photos to clean out:
@@ -358,8 +358,10 @@ async function score(n) {
                                        body: JSON.stringify({sha: p.sha, score: n || null})});
   if (!r.ok) { status('Could not save the score'); return; }
   p.score = n || null;
-  if (history[at] === p) badge(p.score);
   flash(n ? '★'.repeat(n) : 'Score cleared');
+  if (history[at] !== p) return;      // scored the photo the timer was already fading out
+  badge(p.score);
+  if (n) step(1);                     // scored: on to the next photo
 }
 
 document.addEventListener('keydown', e => {
