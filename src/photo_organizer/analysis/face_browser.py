@@ -8,12 +8,14 @@ Writes labels to face_labels.json (cluster_id -> person name).
 Caches face crops in face_crops/.
 
 With --ark it works over the photoArk analysis DB instead (~/.photo-organizer/analysis.db, see
-ark.py and ark_faces.py): names go to persons + faces.person_id, and it binds 127.0.0.1 only.
+ark.py and ark_faces.py): names go to persons + faces.person_id. It binds 127.0.0.1 unless --host says otherwise
+(--host 0.0.0.0 lets other machines on the LAN name faces too; there is no login).
 """
 
 import argparse
 import json
 import os
+import socket
 import sqlite3
 import webbrowser
 from contextlib import closing
@@ -865,10 +867,11 @@ def main_ark(args):
             "SELECT COUNT(*), COUNT(DISTINCT cluster_id) FROM faces").fetchone()
     url = f"http://127.0.0.1:{args.port}/"
     print(f"{n_faces:,} faces in {n_clusters:,} clusters from {db_path} → {url}")
+    if args.host != "127.0.0.1":
+        print(f"(also on the LAN at http://{socket.gethostname()}:{args.port}/, no login)")
     if not args.no_open:
         Timer(0.6, lambda: webbrowser.open(url)).start()
-    # Always loopback: the page writes names with no auth.
-    uvicorn.run(make_ark_app(db_path, crop_dir), host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(make_ark_app(db_path, crop_dir), host=args.host, port=args.port, log_level="warning")
 
 
 def main():
@@ -879,14 +882,12 @@ def main():
     parser.add_argument("--no-open", action="store_true")
     add_data_dir_arg(parser)
     parser.add_argument("--ark", action="store_true",
-                        help="label faces in the photoArk analysis DB (always binds 127.0.0.1)")
+                        help="label faces in the photoArk analysis DB")
     parser.add_argument("--db", default=DEFAULT_ANALYSIS_DB, help="analysis DB for --ark")
     parser.add_argument("--crops", default="~/.photo-organizer/face_crops",
                         help="face crop cache for --ark")
     args = parser.parse_args()
     if args.ark:
-        if args.host != "127.0.0.1":
-            parser.error("--ark binds 127.0.0.1 only")
         return main_ark(args)
 
     global CLUSTERS_FILE, ANALYSIS_FILE, LABELS_FILE, CROP_DIR

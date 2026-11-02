@@ -5,7 +5,9 @@ Then:  http://127.0.0.1:8079/
 
 Search matches every word against the day's title, summary, keywords, setting, event type,
 names and folder, and against the captions of the day's sampled photos. "Open folder" opens the
-day folder in Finder; it binds 127.0.0.1 only and opens only folders listed in the days table.
+day folder in Finder on this Mac. It binds 127.0.0.1 unless --host says otherwise (--host 0.0.0.0
+serves the LAN, with no login); Open folder and Show in Finder work only from this Mac itself, and
+only for folders listed in the days table.
 "This is wrong" queues the day for re-analysis with more frames (days.mark_wrong); the running
 photo-ark-analyze days job picks it up before its next day.
 """
@@ -14,6 +16,7 @@ import argparse
 import io
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import webbrowser
@@ -22,7 +25,7 @@ from pathlib import Path
 from threading import Timer
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
@@ -98,6 +101,10 @@ def _jpeg(path, side):
     return buf.getvalue()
 
 
+def _local(request):
+    return bool(request.client) and request.client.host in ('127.0.0.1', '::1')
+
+
 class WrongIn(BaseModel):
     day: str
     note: str = ''
@@ -155,9 +162,16 @@ def make_app(db_path, thumb_dir, opener=None):
                 raise HTTPException(404)
         return {'ok': True}
 
+    @app.get("/api/local")
+    def is_local(request: Request):
+        return {'local': _local(request)}
+
     @app.post("/api/open")
-    def open_folder(body: OpenIn):
-        """Open the day folder in Finder, or reveal one of its photos."""
+    def open_folder(body: OpenIn, request: Request):
+        """Open the day folder in Finder, or reveal one of its photos (from this Mac only: Finder
+        would open on this Mac, not on the machine viewing the page)."""
+        if not _local(request):
+            raise HTTPException(403, f"Finder opens on {socket.gethostname()} only")
         if not conn.execute("SELECT 1 FROM days WHERE day = ?", (body.day,)).fetchone():
             raise HTTPException(404)
         if body.sha:
@@ -194,7 +208,8 @@ input[type=search] { flex:1 1 260px; font:inherit; padding:7px 10px; border:1px 
   border-radius:8px; background:var(--card); color:var(--ink); }
 select { font:inherit; padding:6px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--ink); }
 #count { color:var(--muted); font-size:13px; }
-main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:14px; }
+main { padding:16px; display:grid; gap:14px; grid-template-columns:repeat(auto-fill, minmax(min(100%, 720px), 1fr));
+  align-items:start; }
 .day { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
 .top { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
 .date { font-weight:600; font-variant-numeric:tabular-nums; }
@@ -208,7 +223,8 @@ main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:14px; }
 .bursts { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; }
 .burst .meta { margin-bottom:4px; }
 .thumbs { display:flex; gap:6px; }
-.thumbs img { height:96px; border-radius:6px; cursor:zoom-in; background:var(--line); }
+.thumbs { flex-wrap:wrap; }
+.thumbs img { height:120px; border-radius:6px; cursor:zoom-in; background:var(--line); }
 .path { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
 .badge { font-size:12px; padding:2px 8px; border-radius:999px; background:#f6d38a; color:#3a2a00; }
 .badge.redone { background:var(--chip); color:var(--muted); }
@@ -216,7 +232,7 @@ button.wrong { border-color:#c4542d; color:#c4542d; }
 .path code { font-size:12px; color:var(--muted); word-break:break-all; }
 button.open { font:inherit; font-size:13px; padding:4px 10px; border-radius:8px; border:1px solid var(--accent);
   background:transparent; color:var(--accent); cursor:pointer; }
-#more { justify-self:center; }
+#more { grid-column:1 / -1; justify-self:center; }
 #viewer { position:fixed; inset:0; background:rgba(0,0,0,.88); display:none; align-items:center;
   justify-content:center; flex-direction:column; gap:10px; z-index:5; padding:16px; }
 #viewer img { max-width:100%; max-height:82vh; border-radius:6px; }
@@ -265,11 +281,13 @@ function card(d) {
     ${d.wrong_at ? `<span class="badge">Queued for re-analysis${d.wrong_note ? ': ' + esc(d.wrong_note) : ''}</span>`
       : d.attempt ? `<span class="badge redone">Re-analyzed${d.wrong_note ? ' after: ' + esc(d.wrong_note) : ''}</span>` : ''}
     <div class="summary">${esc(d.summary)}</div><div class="chips">${chips}</div><div class="bursts">${bursts}</div>
-    <div class="path"><button class="open" data-open="${esc(d.day)}">Open folder</button>
+    <div class="path"><button class="open" data-open="${esc(d.day)}">${local ? 'Open folder' : 'Copy path'}</button>
     ${d.wrong_at ? '' : `<button class="open wrong" data-wrong="${esc(d.day)}">This is wrong</button>`}<code>${esc(d.day)}</code></div></article>`;
 }
 
+let local = true;
 async function openIn(day, sha) {
+  if (!local) { try { await navigator.clipboard.writeText(day); } catch (e) { prompt('Folder path:', day); } return; }
   const r = await fetch('/api/open', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                       body: JSON.stringify({day, sha})});
   if (!r.ok) alert((await r.json()).detail || 'Could not open it');
@@ -322,6 +340,8 @@ $('#year').addEventListener('change', () => load(true));
 $('#order').addEventListener('change', () => load(true));
 
 (async () => {
+  local = (await (await fetch('/api/local')).json()).local;
+  if (!local) { document.body.classList.add('remote'); $('#vreveal').textContent = 'Copy folder path'; }
   for (const y of await (await fetch('/api/years')).json())
     $('#year').insertAdjacentHTML('beforeend', `<option>${esc(y)}</option>`);
   try { const s = JSON.parse(localStorage.getItem('days-ui') || '{}');
@@ -335,6 +355,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--db', default=DEFAULT_ANALYSIS_DB)
     parser.add_argument('--port', type=int, default=8079)
+    parser.add_argument('--host', default='127.0.0.1', help='0.0.0.0 to serve the LAN (no login)')
     parser.add_argument('--thumbs', default=DEFAULT_THUMBS, help='thumbnail cache')
     parser.add_argument('--no-open', action='store_true', help="don't open a browser")
     args = parser.parse_args()
@@ -345,10 +366,11 @@ def main():
         n = conn.execute("SELECT COUNT(*) FROM days WHERE summarized_at IS NOT NULL").fetchone()[0]
     url = f"http://127.0.0.1:{args.port}/"
     print(f"{n:,} day summaries in {db_path} → {url}")
+    if args.host != '127.0.0.1':
+        print(f"(also on the LAN at http://{socket.gethostname()}:{args.port}/, no login)")
     if not args.no_open:
         Timer(0.6, lambda: webbrowser.open(url)).start()
-    # Always loopback: the page can open Finder windows.
-    uvicorn.run(make_app(db_path, Path(args.thumbs).expanduser()), host="127.0.0.1", port=args.port,
+    uvicorn.run(make_app(db_path, Path(args.thumbs).expanduser()), host=args.host, port=args.port,
                 log_level="warning")
 
 

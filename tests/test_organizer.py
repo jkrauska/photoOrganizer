@@ -946,7 +946,11 @@ def test_ark_day_browser_searches_summaries_and_captions_and_opens_only_known_da
                                             'samples': ['h1'] if d == str(day) else []}]), title, json.dumps(kw)))
     conn.commit()
     opened = []
-    client = TestClient(make_app(db, tmp_path / 'thumbs', opener=opened.append))
+    client = TestClient(make_app(db, tmp_path / 'thumbs', opener=opened.append), client=('127.0.0.1', 5000))
+    remote = TestClient(make_app(db, tmp_path / 'thumbs', opener=opened.append), client=('192.168.1.9', 5000))
+    assert remote.post('/api/open', json={'day': str(day)}).status_code == 403     # Finder is on this Mac
+    assert remote.get('/api/local').json() == {'local': False}
+    assert client.get('/api/local').json() == {'local': True}
     assert client.get('/api/days').json()['total'] == 2
     assert [d['title'] for d in client.get('/api/days', params={'q': 'surf'}).json()['items']] == ['Beach day']
     assert [d['title'] for d in client.get('/api/days', params={'q': 'tabby cat'}).json()['items']] == ['Beach day']
