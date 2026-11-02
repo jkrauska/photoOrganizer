@@ -55,8 +55,12 @@ def render_xmp(p):
     return xmp_sidecar(p)
 
 
+def sidecar_path(uuid, sidecar_dir):
+    return os.path.join(sidecar_dir, uuid[:1], uuid + '.xmp')
+
+
 def _write_sidecar(p, sidecar_dir):
-    path = os.path.join(sidecar_dir, p.uuid[:1], p.uuid + '.xmp')
+    path = sidecar_path(p.uuid, sidecar_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     body = render_xmp(p)
     tmp = path + '.tmp'
@@ -109,7 +113,7 @@ def catalog_year(conn, source, db=None, sidecar_dir=None):
     for p in sorted(assets, key=lambda p: p.date):
         taken = p.date.replace(tzinfo=None).isoformat()     # local time where it was taken
         group = f"photos:{p.uuid}"
-        if p.path in known:
+        if sidecar_path(p.uuid, sidecar_dir) in known:     # its sidecar is cataloged last: the asset is complete
             continue
         files = asset_files(p, sidecar_dir)
         if not files:

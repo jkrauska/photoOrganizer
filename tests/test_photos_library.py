@@ -144,3 +144,18 @@ def test_queue_takes_photos_years_oldest_first(env, library, tmp_path):
     assert [r['status'] for r in conn.execute("SELECT status FROM queue ORDER BY id")] == ['done', 'done']
     assert files_under(dest) == ['2011/01/2011-01-02/B.JPG', '2011/01/2011-01-02/B.JPG.xmp',
                                  '2019/01/2019-01-02/A.JPG', '2019/01/2019-01-02/A.JPG.xmp']
+
+
+def test_an_asset_cataloged_only_in_part_gets_its_other_files(env, library):
+    _, dest, go, rows = env
+    lib, photos = library
+    p = asset(lib, 'HHHH', 'IMG_0008.JPG', datetime.datetime(2022, 6, 1, 10, tzinfo=PT), live=True)
+    photos.append(p)
+    conn = init_db(str(dest.parent / 'local' / 'catalog.db'))
+    conn.execute("INSERT INTO files (filename, original_path, source_root, taken_at, date_source, group_key, "
+                 "photos_uuid, status, file_size) VALUES ('IMG_0008.JPG', ?, 'photos:2022', '2022-06-01T10:00:00', "
+                 "'photos', 'photos:HHHH', 'HHHH', 'pending', ?)", (p.path, os.path.getsize(p.path)))
+    conn.commit()                                         # an earlier run stopped after the original
+    go(sources=['photos:2022'])
+    assert files_under(dest) == ['2022/06/2022-06-01/IMG_0008.JPG', '2022/06/2022-06-01/IMG_0008.JPG.xmp',
+                                 '2022/06/2022-06-01/IMG_0008.MOV']
