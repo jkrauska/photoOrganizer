@@ -14,6 +14,7 @@ backfill_hashes reads it (worker idle time), and a same-size arrival hashes it f
 
 import os
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -145,6 +146,7 @@ class TransferContext:
         self.inflight = {}          # sha256 -> Event set when that content's first copy finishes
         self.verified = {}          # canonical dest_path -> bool (NAS re-read result this run)
         self.verify_lock = threading.Lock()
+        self.claimed = {}           # lowercased dest_path -> fid: SMB names are case-insensitive
 
     def set_status(self, fid, status, sha=None, message=None, dest_path=None):
         with self.db_lock:
@@ -227,13 +229,14 @@ def _claim_dest(ctx, fid, planned, src_hash):
     stem, ext = os.path.splitext(filename)
     for i in range(10000):
         candidate = os.path.join(dest_dir, filename if i == 0 else f"{stem}_{i}{ext}")
-        if ctx.conn.execute(
+        if ctx.claimed.get(candidate.lower(), fid) != fid or ctx.conn.execute(
             "SELECT 1 FROM files WHERE dest_path = ? AND status IN ('done', 'copying') AND id != ?",
             (candidate, fid),
         ).fetchone():
             continue
         if ctx.fs.exists(candidate) and (not src_hash or ctx.fs.sha256(candidate, nocache=True) != src_hash):
             continue  # stray file not from this catalog; never overwrite it
+        ctx.claimed[candidate.lower()] = fid
         return candidate
     raise RuntimeError(f"Too many collisions for {filename} in {dest_dir}")
 
@@ -410,12 +413,6 @@ def transfer_one(ctx, fid, src, planned):
                 waiter = ctx.inflight.get(src_hash) if not dup else None
                 if not dup and not waiter:
                     ctx.inflight[src_hash] = threading.Event()
-                    dst = _claim_dest(ctx, fid, planned, src_hash)
-                    ctx.conn.execute(
-                        "UPDATE files SET status = 'copying', sha256 = ?, dest_path = ? WHERE id = ?",
-                        (src_hash, dst, fid),
-                    )
-                    ctx.conn.commit()
             if dup:
                 return _remove_duplicate(ctx, fid, src, src_hash, dup['dest_path'])
             if waiter:
@@ -423,7 +420,15 @@ def transfer_one(ctx, fid, src, planned):
                 continue
             break
 
+        # From here the event must be set whatever happens, or workers with the same content wait forever.
         try:
+            with ctx.db_lock:
+                dst = _claim_dest(ctx, fid, planned, src_hash)
+                ctx.conn.execute(
+                    "UPDATE files SET status = 'copying', sha256 = ?, dest_path = ? WHERE id = ?",
+                    (src_hash, dst, fid),
+                )
+                ctx.conn.commit()
             return _copy_verify_delete(ctx, fid, src, dst, src_hash, size)
         finally:
             with ctx.db_lock:
@@ -463,7 +468,10 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=Fal
 
     def heartbeat():
         while not beat_stop.wait(2):
-            set_progress(conn, ctx.db_lock, batch_done=ctx.completed, large=ctx.large_snapshot())
+            try:
+                set_progress(conn, ctx.db_lock, batch_done=ctx.completed, large=ctx.large_snapshot())
+            except sqlite3.OperationalError:
+                pass            # catalog busy (e.g. a long checkpoint): try again next beat
 
     beat = threading.Thread(target=heartbeat, name='progress-heartbeat', daemon=True)
     beat.start()

@@ -1033,3 +1033,41 @@ def test_ark_days_marked_wrong_are_redone_first_with_more_frames_and_the_note(tm
     days.set_context(conn, str(d), '')                                    # removed: redone without it
     assert days.run_days(conn, found, vlm, summary, log=lambda s: None) == 1
     assert 'Context from' not in prompts[3] and days.get_context(conn, str(d)) is None
+
+
+def test_a_failed_claim_never_leaves_same_content_workers_waiting(env, monkeypatch):
+    """A catalog write failing (e.g. 'database is locked') after a worker took the in-flight slot for
+    some content must still release it; workers holding the same content once waited forever."""
+    import shutil
+    import sqlite3 as sq
+    import threading
+    import photo_organizer.transfer as transfer
+    src, dest, go, rows = env
+    a = make_jpeg(f"{src}/a/IMG_1.jpg", "2019:03:02 10:00:00")
+    for d in 'bcd':
+        (src / d).mkdir()
+        shutil.copy2(a, src / d / 'IMG_1.jpg')
+    real, calls = transfer._claim_dest, []
+
+    def flaky(ctx, fid, planned, src_hash):
+        calls.append(fid)
+        if src_hash and len(calls) == 1:
+            raise sq.OperationalError('database is locked')
+        return real(ctx, fid, planned, src_hash)
+    monkeypatch.setattr(transfer, '_claim_dest', flaky)
+    t = threading.Thread(target=go, kwargs={'workers': 4}, daemon=True)
+    t.start()
+    t.join(60)
+    assert not t.is_alive(), "transfer hung"
+    assert files_under(dest) == ['2019/03/2019-03-02/IMG_1.jpg']
+    statuses = sorted(r['status'] for r in rows().values())
+    assert statuses.count('error') == 1 and statuses.count('done') == 1
+
+
+def test_names_differing_only_in_case_get_separate_files(env):
+    src, dest, go, rows = env
+    make_jpeg(f"{src}/a/IMG_1.HEIC.jpg", "2019:03:02 10:00:00", (1, 2, 3))
+    make_jpeg(f"{src}/b/IMG_1.heic.jpg", "2019:03:02 10:00:00", (9, 8, 7))
+    go(workers=2)
+    assert len(files_under(dest)) == 2
+    assert all(r['status'] == 'done' for r in rows().values())

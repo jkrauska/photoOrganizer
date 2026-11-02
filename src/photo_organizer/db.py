@@ -93,7 +93,8 @@ NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%f', 'now')"
 def init_db(db_path):
     """Open (creating if needed) the catalog and bring an older schema up to date."""
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
+    # Generous busy timeout: a checkpoint of a large write-ahead log can hold the write lock for a while.
+    conn = sqlite3.connect(db_path, timeout=180, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     existing = {r['name'] for r in conn.execute("PRAGMA table_info(files)")}
