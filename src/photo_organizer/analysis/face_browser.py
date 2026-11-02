@@ -541,7 +541,8 @@ ARK_HTML = r"""<!doctype html>
   #viewer img { max-width: 95vw; max-height: 88vh; object-fit: contain; background: #222; min-width: 80px; min-height: 80px; }
   #viewer div { color: #ddd; font-size: 13px; }
   #grid h4 { grid-column: 1 / -1; margin: 6px 0 0; font-size: 12px; color: #666; font-weight: 500; }
-  #grid h4 button { font-size: 11px; padding: 1px 8px; margin-left: 8px; }
+  #grid h4 button { font-size: 11px; padding: 1px 8px; margin-left: 8px; cursor: pointer; }
+  #grid h4 button.confirm { border: 1px solid #2a7; color: #2a7; background: white; border-radius: 4px; }
   #grid h3 { grid-column: 1 / -1; margin: 12px 0 0; font-size: 14px; color: #444; border-bottom: 1px solid #eee; padding-bottom: 4px; }
   #grid h3:first-child { margin-top: 0; }
   #grid h3 small { color: #888; font-weight: 400; }
@@ -702,7 +703,8 @@ async function loadFaces() {
         lastBand = band;
         const n = todo.filter(x => (x.sim === undefined ? null : Math.floor(x.sim * 10)) === band).length;
         const label = band === null ? 'no embedding' : `similarity ${(band / 10).toFixed(1)}–${((band + 1) / 10).toFixed(1)}`;
-        groups.push(`<h4>${label} · ${n} <button onclick="selectBand(${band})">Select these</button></h4>`);
+        groups.push(`<h4>${label} · ${n} <button onclick="selectBand(${band})">Select these</button>` +
+          (to ? `<button class="confirm" onclick="confirmBand(${band})">Confirm as ${escapeHtml(to)}</button>` : '') + `</h4>`);
       }
       groups.push(figureHtml(f));
     }
@@ -728,6 +730,20 @@ async function loadFaces() {
     });
     inp.addEventListener('blur', () => saveFaceLabel(inp));
   });
+}
+
+const bandOf = f => f.sim === undefined ? null : Math.floor(f.sim * 10);
+
+// Name every face of a band (bursts included) as the person the band is measured against.
+async function confirmBand(band) {
+  const todo = faces.filter(f => f.source !== 'manual');
+  const name = todo.find(f => f.sim_to)?.sim_to;
+  const ids = todo.filter(f => bandOf(f) === band).flatMap(idsOf);
+  if (!name || !ids.length) return;
+  const y = window.scrollY;
+  await post('/api/label_faces', {face_ids: ids, label: name});
+  await refresh();
+  window.scrollTo(0, y);
 }
 
 function selectBand(band) {
