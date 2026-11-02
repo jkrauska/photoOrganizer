@@ -10,6 +10,7 @@ DEST    ?= /Volumes/photoArk
 CATALOG ?= $(HOME)/.photo-organizer/catalog.db
 LOGDIR  ?= $(HOME)/.photo-organizer/logs
 LIMIT   ?= 0
+YEAR    ?= 2010
 BATCH   ?= 5000
 WORKERS ?= 4
 EXIF_WORKERS ?= 8
@@ -31,7 +32,8 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
-.PHONY: help sync inventory run queue queue-list worker worker-bg stop verify status enrich faces browse test
+.PHONY: help sync inventory run queue queue-list worker worker-bg stop verify status enrich faces browse test \
+	ark-faces ark-describe ark-seed ark-stats
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
@@ -45,6 +47,8 @@ help:
 	@echo "make enrich     Gemma 4 + InsightFace analysis, clustering, metadata, index (Apple Photos)"
 	@echo "make faces      face-cluster labeling app"
 	@echo "make browse     Datasette over the analysis index"
+	@echo "make ark-faces  faces for one store year (YEAR=2010); ark-describe adds Gemma, in background"
+	@echo "make ark-seed   suggest names from the Apple Photos labels; ark-stats shows counts"
 	@echo "make test       run the test suite"
 	@echo
 	@echo "SOURCES=$(SOURCES)"
@@ -97,6 +101,21 @@ faces:
 browse:
 	uv sync --quiet --extra analysis
 	uv run datasette "$${PHOTO_ANALYSIS_DIR:-$(HOME)/gemma}/photos.db" -o
+
+ark-faces: | $(LOGDIR)
+	uv sync --quiet --extra analysis
+	uv run photo-ark-analyze run --year $(YEAR) --no-vlm 2>&1 | tee "$(LOGDIR)/ark-faces-$(YEAR)-$(STAMP).log"
+
+ark-describe: | $(LOGDIR)
+	uv sync --quiet --extra analysis
+	@nohup uv run photo-ark-analyze run --year $(YEAR) > "$(LOGDIR)/ark-describe-$(YEAR)-$(STAMP).log" 2>&1 & \
+		echo "Gemma + faces running in background (pid $$!), log: $(LOGDIR)/ark-describe-$(YEAR)-$(STAMP).log"
+
+ark-seed:
+	uv run photo-ark-analyze seed-names
+
+ark-stats:
+	uv run photo-ark-analyze stats
 
 test:
 	uv run pytest -q

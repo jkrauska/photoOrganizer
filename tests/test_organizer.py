@@ -1,9 +1,11 @@
 import datetime
+import json
 import os
 import shutil
 import sqlite3
 import subprocess
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -580,3 +582,90 @@ def test_nas_detection_maps_shares_by_listing():
         assert nas.same_server(['/Volumes/fileshares/x'], '/Volumes/photoArk', mounts) == 'nas.local'
     finally:
         nas._visible_names = orig
+
+
+def _ark_catalog(tmp_path, rows):
+    from photo_organizer.db import init_db
+    db = str(tmp_path / 'catalog.db')
+    conn = init_db(db)
+    for i, (path, sha, status) in enumerate(rows):
+        conn.execute("INSERT INTO files (original_path, filename, file_size, status, sha256, dest_path) "
+                     "VALUES (?, ?, 1, ?, ?, ?)", (f"/src/{i}", os.path.basename(path), status, sha, path))
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_ark_selects_stored_images_once_per_hash(tmp_path):
+    from photo_organizer.analysis.ark import select_images
+    db = _ark_catalog(tmp_path, [
+        ('/store/2010/01/2010-01-01/a.jpg', 'h1', 'done'),
+        ('/store/2010/01/2010-01-01/a_1.jpg', 'h1', 'done'),      # same content, second name
+        ('/store/2010/02/2010-02-02/b.ARW', 'h2', 'done'),
+        ('/store/2010/02/2010-02-02/c.mov', 'h3', 'done'),        # video: not analyzed
+        ('/store/2010/03/2010-03-03/d.jpg', 'h4', 'error'),
+        ('/store/2011/01/2011-01-01/e.jpg', 'h5', 'done'),
+        ('/store/20100/x.jpg', 'h6', 'done'),                     # prefix must match a folder
+    ])
+    assert select_images(db, year=2010, dest='/store') == [
+        ('h1', '/store/2010/01/2010-01-01/a.jpg'), ('h2', '/store/2010/02/2010-02-02/b.ARW')]
+
+
+def test_ark_analysis_is_oriented_resumable_per_stage_and_keyed_by_hash(tmp_path):
+    from photo_organizer.analysis import ark
+    img = tmp_path / 'p.jpg'
+    exif = Image.Exif()
+    exif[0x0112] = 6                                             # stored landscape, shown portrait
+    Image.new('RGB', (40, 20), (200, 10, 10)).save(img, 'JPEG', exif=exif)
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    seen = []
+
+    def faces(im):
+        seen.append(im.size)
+        return [{'bbox': [1, 2, 11, 22], 'det_score': 0.9, 'age': 30, 'gender': 'F',
+                 'embedding': np.ones(512, dtype=np.float32) / np.sqrt(512)}]
+
+    def vlm(path):
+        assert Image.open(path).size == (20, 40)
+        return {'caption': 'a red square', 'scene': 'indoor', 'keywords': ['red', 7], 'subjects': ['square']}
+
+    images = [('h1', str(img))]
+    assert ark.run(conn, images, face_fn=faces, log=lambda s: None) == 1
+    assert seen == [(20, 40)], "faces are found in the EXIF-oriented image"
+    r = conn.execute("SELECT * FROM images").fetchone()
+    assert (r['width'], r['height'], r['source'], r['vlm_at']) == (20, 40, 'file', None)
+    assert ark.run(conn, images, face_fn=faces, log=lambda s: None) == 0, "faces stage resumes"
+    assert ark.run(conn, images, face_fn=faces, vlm_fn=vlm, vlm_name='m', log=lambda s: None) == 1
+    assert seen == [(20, 40)], "a later describe pass does not redo faces"
+    r = conn.execute("SELECT * FROM images").fetchone()
+    assert r['caption'] == 'a red square' and json.loads(r['keywords']) == ['red'] and r['vlm_model'] == 'm'
+    f = conn.execute("SELECT * FROM faces").fetchone()
+    assert (f['sha256'], f['x2'], f['y2'], len(f['embedding'])) == ('h1', 11, 22, 512 * 4)
+
+
+def test_ark_seed_names_suggests_without_touching_manual_labels(tmp_path):
+    from photo_organizer.analysis import ark
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    rng = np.random.default_rng(0)
+    unit = lambda v: (v / np.linalg.norm(v)).astype(np.float32)
+    alice, bob = unit(rng.normal(size=512)), unit(rng.normal(size=512))
+    near = lambda v: unit(v + 0.3 * rng.normal(size=512) / 22)
+    refs = {'Alice': {'cluster': [near(alice) for _ in range(5)], 'manual': []},
+            'Bob': {'cluster': [], 'manual': [near(bob) for _ in range(3)]},
+            # a chained cluster of strangers plus one hand-named face: only the latter is used
+            'Dan': {'cluster': [unit(rng.normal(size=512)) for _ in range(20)], 'manual': [near(alice)]}}
+    centroids = ark.reference_centroids(refs)
+    assert 'too mixed' in centroids['Dan'][2] and centroids['Dan'][1] == 1
+    del refs['Dan']
+    centroids = ark.reference_centroids(refs)
+    conn.execute("INSERT INTO images (sha256, path) VALUES ('h', '/p')")
+    for i, e in enumerate([alice, bob, unit(rng.normal(size=512)), bob]):
+        conn.execute("INSERT INTO faces (sha256, face_idx, det_score, embedding) VALUES ('h', ?, 0.9, ?)",
+                     (i, e.tobytes()))
+    pid = ark._person_id(conn, 'Carol')
+    conn.execute("UPDATE faces SET person_id = ?, person_source = 'manual' WHERE face_idx = 3", (pid,))
+    assert ark.seed_names(conn, centroids) == {'Alice': 1, 'Bob': 1}
+    got = {r['face_idx']: (r['name'], r['person_source']) for r in conn.execute(
+        "SELECT f.face_idx, p.name, f.person_source FROM faces f LEFT JOIN persons p ON p.id = f.person_id")}
+    assert got == {0: ('Alice', 'suggested'), 1: ('Bob', 'suggested'), 2: (None, None), 3: ('Carol', 'manual')}
+    assert ark.seed_names(conn, centroids) == {'Alice': 1, 'Bob': 1}, "re-seeding replaces old suggestions"

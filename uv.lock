@@ -1457,6 +1457,7 @@ analysis = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "numpy" },
     { name = "pillow" },
     { name = "pytest" },
 ]
@@ -1480,6 +1481,7 @@ provides-extras = ["analysis"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "numpy", specifier = ">=2.4.6" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pytest", specifier = ">=8" },
 ]

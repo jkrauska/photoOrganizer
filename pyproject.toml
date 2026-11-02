@@ -9,7 +9,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "Pillow>=10.0"]
+dev = [
+    "pytest>=8",
+    "Pillow>=10.0",
+    "numpy>=2.4.6",
+]
 
 [project.optional-dependencies]
 analysis = [
@@ -38,6 +42,7 @@ photo-cluster-faces = "photo_organizer.analysis.cluster:main"
 photo-enrich = "photo_organizer.analysis.enrich:main"
 photo-index = "photo_organizer.analysis.index:main"
 photo-face-browser = "photo_organizer.analysis.face_browser:main"
+photo-ark-analyze = "photo_organizer.analysis.ark:main"
 
 [build-system]
 requires = ["hatchling"]
