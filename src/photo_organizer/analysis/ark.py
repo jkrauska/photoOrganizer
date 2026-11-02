@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS faces (
     person_score REAL,
     UNIQUE (sha256, face_idx)
 );
+CREATE TABLE IF NOT EXISTS face_not_person (   -- "No, this isn't them" answers in the face UI
+    face_id INTEGER NOT NULL,
+    person_id INTEGER NOT NULL,
+    PRIMARY KEY (face_id, person_id)
+);
 CREATE INDEX IF NOT EXISTS idx_faces_person ON faces(person_id);
 CREATE INDEX IF NOT EXISTS idx_faces_cluster ON faces(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_images_path ON images(path);

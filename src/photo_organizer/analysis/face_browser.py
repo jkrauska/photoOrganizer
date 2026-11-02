@@ -365,6 +365,11 @@ class ArkSuggestionsIn(BaseModel):
     accept: bool
 
 
+class ArkGuessNoIn(BaseModel):
+    cluster_id: str
+    name: str
+
+
 class ArkForgetIn(BaseModel):
     face_ids: list[int] = []
     cluster_id: str | None = None
@@ -398,6 +403,20 @@ def make_ark_app(db_path, crop_dir) -> FastAPI:
     def cluster(cid: str, limit: int = 500):
         with db() as conn:
             return cluster_or_404(ark_faces.cluster_detail, conn, cid, limit)
+
+    @ark.get("/api/cluster/{cid}/guess")
+    def guess(cid: str):
+        with db() as conn:
+            return cluster_or_404(ark_faces.guess_cluster, conn, cid)
+
+    @ark.post("/api/guess_no")
+    def guess_no(body: ArkGuessNoIn):
+        with db() as conn:
+            try:
+                n = ark_faces.not_this_person(conn, body.cluster_id, body.name)
+            except KeyError:
+                raise HTTPException(404, "cluster or person not found")
+        return {"ok": True, "faces": n}
 
     @ark.get("/api/persons")
     def persons():
@@ -494,6 +513,10 @@ ARK_HTML = r"""<!doctype html>
                   background: rgba(0,0,0,0.55); color: white; font-size: 14px; cursor: pointer; display: none; }
   #grid figure:hover .forget { display: block; }
   #header button.danger { border-color: #d33; color: #d33; }
+  #guessRow:empty { display: none; }
+  #guessRow { background: #eef6ff; border: 1px solid #9cc3ee; border-radius: 8px; padding: 10px 12px; font-size: 16px; }
+  #guessRow span { flex: 1; }
+  #guessRow small { color: #678; font-size: 12px; }
   #viewer { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; z-index: 10;
             flex-direction: column; align-items: center; justify-content: center; gap: 8px; cursor: zoom-out; }
   #viewer.open { display: flex; }
@@ -603,7 +626,8 @@ async function selectCluster(id) {
   document.getElementById('main').innerHTML = `
     <div id="header">${isUnclustered
       ? `<h2>Unclustered faces (best detections first) — these didn't group automatically. Name each one below; Enter saves and moves on.</h2>`
-      : `<h2>Name this person (${c.count} face${c.count===1?'':'s'} in ${c.id}). Faces named individually as someone else keep their name.</h2>
+      : `<div class="row" id="guessRow"></div>
+         <h2>Name this person (${c.count} face${c.count===1?'':'s'} in ${c.id}). Faces named individually as someone else keep their name.</h2>
          <div class="row">
            <input id="labelInput" list="persons" placeholder="Name for the whole cluster…" value="${escapeHtml(c.label)}">
            <button onclick="saveLabel(false)">Save</button>
@@ -619,7 +643,7 @@ async function selectCluster(id) {
     input.select();
     input.addEventListener('keydown', e => { if (e.key === 'Enter') saveLabel(true); });
   }
-  await loadFaces();
+  await Promise.all([loadFaces(), isUnclustered ? null : loadGuess()]);
   if (isUnclustered) document.querySelector('#grid .face-name:not(.saved)')?.focus();
 }
 
@@ -672,6 +696,31 @@ function closeViewer() {
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
+
+let guess = null;
+
+async function loadGuess() {
+  const id = currentId;
+  const g = await fetch(`/api/cluster/${id}/guess`).then(r => r.json());
+  if (id !== currentId) return;
+  guess = g;
+  const row = document.getElementById('guessRow');
+  if (!row) return;
+  row.innerHTML = g ? `<span>Is this <b>${escapeHtml(g.name)}</b>? <small>(similarity ${g.score.toFixed(2)})</small></span>
+      <button class="primary" onclick="guessYes()">Yes</button>
+      <button onclick="guessNo()">No</button>` : '';
+}
+
+async function guessYes() {
+  document.getElementById('labelInput').value = guess.name;
+  await saveLabel(true);
+}
+
+async function guessNo() {
+  await post('/api/guess_no', {cluster_id: currentId, name: guess.name});
+  await loadGuess();
+  document.getElementById('labelInput')?.focus();
+}
 
 function selectedIds() {
   return [...document.querySelectorAll('#grid figure.selected')].map(el => parseInt(el.dataset.id, 10));

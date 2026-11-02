@@ -12,13 +12,19 @@ import os
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 
-from photo_organizer.analysis.ark import _person_id, load_image, open_db
+from photo_organizer.analysis.ark import _centroid, _person_id, _unit_rows, _unpack, load_image, open_db
 
 UNCLUSTERED = 'unclustered'
 CROP_THUMB_SIZE = 256
 FULL_MAX_SIDE = 2048
+# "Is this X?" is asked only for a clear match: cosine between the cluster's centre and the centre
+# of X's hand-named faces, and its lead over the next person. Measured on the 2010-2017 data, true
+# matches scored 0.6-0.7 while sisters' clusters reached 0.49 against each other.
+GUESS_MIN = 0.55
+GUESS_MARGIN = 0.15
 
 
 def connect(db_path):
@@ -139,6 +145,7 @@ def forget_faces(conn, face_ids, crop_dir=None):
     rows = conn.execute(f"SELECT sha256, face_idx, x1, y1, x2, y2 FROM faces WHERE id IN ({marks})",
                         face_ids).fetchall()
     cur = conn.execute(f"DELETE FROM faces WHERE id IN ({marks})", face_ids)
+    conn.execute(f"DELETE FROM face_not_person WHERE face_id IN ({marks})", face_ids)
     conn.commit()
     if crop_dir:
         for r in rows:
@@ -173,6 +180,62 @@ def full_image(conn, face_id, max_side=FULL_MAX_SIDE):
     buf = io.BytesIO()
     img.save(buf, 'JPEG', quality=88)
     return buf.getvalue()
+
+
+def _person_centroids(conn, min_faces=3):
+    """(person ids, names, unit centroid rows) of people with enough hand-named faces."""
+    by_person = {}
+    for r in conn.execute("SELECT person_id, embedding FROM faces "
+                          "WHERE person_source = 'manual' AND embedding IS NOT NULL"):
+        by_person.setdefault(r['person_id'], []).append(_unpack(r['embedding']))
+    pids = sorted(p for p, es in by_person.items() if len(es) >= min_faces)
+    if not pids:
+        return [], [], None
+    names = dict(conn.execute("SELECT id, name FROM persons").fetchall())
+    return pids, [names[p] for p in pids], np.stack([_centroid(_unit_rows(by_person[p])) for p in pids])
+
+
+def _unnamed_in_cluster(conn, cid):
+    where, params = _cluster_where(cid)
+    return conn.execute(f"SELECT f.id, f.embedding FROM faces f WHERE {where} AND f.person_id IS NULL "
+                        f"AND f.embedding IS NOT NULL", params).fetchall()
+
+
+def guess_cluster(conn, cid, min_score=GUESS_MIN, margin=GUESS_MARGIN):
+    """{'name', 'score'} when an unnamed cluster clearly looks like someone already named, else None.
+    People that most of the cluster's unnamed faces were said not to be are skipped."""
+    if cid == UNCLUSTERED or _cluster_name(conn, cid)[1]:
+        return None
+    rows = _unnamed_in_cluster(conn, cid)
+    pids, names, C = _person_centroids(conn)
+    if not rows or C is None:
+        return None
+    marks = ','.join('?' * len(rows))
+    said_no = dict(conn.execute(f"SELECT person_id, COUNT(*) FROM face_not_person WHERE face_id IN ({marks}) "
+                                f"GROUP BY person_id", [r['id'] for r in rows]).fetchall())
+    s = C @ _centroid(_unit_rows([_unpack(r['embedding']) for r in rows]))
+    for i, p in enumerate(pids):
+        if said_no.get(p, 0) * 2 >= len(rows):
+            s[i] = -1.0
+    order = np.argsort(-s)
+    best = float(s[order[0]])
+    second = float(s[order[1]]) if len(order) > 1 else -1.0
+    if best >= min_score and best - second >= margin:
+        return {'name': names[order[0]], 'score': round(best, 3)}
+    return None
+
+
+def not_this_person(conn, cid, name):
+    """Record that the cluster's unnamed faces aren't this person (kept per face, so it outlasts
+    re-clustering). Returns faces recorded."""
+    row = conn.execute("SELECT id FROM persons WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        raise KeyError(name)
+    rows = _unnamed_in_cluster(conn, cid)
+    conn.executemany("INSERT OR IGNORE INTO face_not_person (face_id, person_id) VALUES (?, ?)",
+                     [(r['id'], row['id']) for r in rows])
+    conn.commit()
+    return len(rows)
 
 
 def ensure_crop(conn, face_id, crop_dir):

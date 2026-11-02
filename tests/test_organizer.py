@@ -790,6 +790,8 @@ def test_ark_face_browser_app_names_over_http(tmp_path):
     client.post('/api/label_face', json={'face_id': 3, 'label': ''})
     assert client.post('/api/forget', json={'cluster_id': 'c0'}).json()['deleted'] == 1
     assert client.post('/api/forget', json={'cluster_id': 'bad'}).status_code == 404
+    assert client.get('/api/cluster/c0/guess').json() is None
+    assert client.post('/api/guess_no', json={'cluster_id': 'c0', 'name': 'Nobody'}).status_code == 404
 
 
 def test_ark_cluster_splits_chains_of_look_alikes(tmp_path):
@@ -817,3 +819,29 @@ def test_ark_cluster_splits_chains_of_look_alikes(tmp_path):
     got = [r[0] for r in conn.execute("SELECT cluster_id FROM faces ORDER BY face_idx")]
     assert [len(set(got[k * 10:(k + 1) * 10])) for k in range(4)] == [1, 1, 1, 1]
     assert len(set(got)) == 4
+
+
+def test_ark_faces_guesses_a_named_person_for_a_cluster_until_told_no(tmp_path):
+    from photo_organizer.analysis import ark, ark_faces
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    rng = np.random.default_rng(2)
+    unit = lambda v: (v / np.linalg.norm(v)).astype(np.float32)
+    alice, bob = unit(rng.normal(size=512)), unit(rng.normal(size=512))
+    near = lambda v: unit(v + 0.5 * rng.normal(size=512) / np.sqrt(512))
+    conn.execute("INSERT INTO images (sha256, path) VALUES ('h', '/p')")
+    faces = [(0, alice, 'Alice')] * 4 + [(1, bob, 'Bob')] * 4 + [(2, alice, None)] * 5 + [(3, None, None)] * 5
+    for i, (cluster, centre, name) in enumerate(faces):
+        e = near(centre) if centre is not None else unit(rng.normal(size=512))
+        conn.execute("INSERT INTO faces (id, sha256, face_idx, det_score, cluster_id, embedding) "
+                     "VALUES (?, 'h', ?, 0.9, ?, ?)", (i + 1, i, cluster, e.tobytes()))
+        if name:
+            ark_faces.name_faces(conn, [i + 1], name)
+    assert ark_faces.guess_cluster(conn, 'c0') is None, "already named"
+    assert ark_faces.guess_cluster(conn, 'c3') is None, "looks like nobody"
+    assert ark_faces.guess_cluster(conn, 'unclustered') is None
+    g = ark_faces.guess_cluster(conn, 'c2')
+    assert g['name'] == 'Alice' and g['score'] > 0.55
+    assert ark_faces.not_this_person(conn, 'c2', 'Alice') == 5
+    assert ark_faces.guess_cluster(conn, 'c2') is None, "a No is remembered"
+    ark_faces.forget_faces(conn, [9])
+    assert conn.execute("SELECT COUNT(*) FROM face_not_person").fetchone()[0] == 4
