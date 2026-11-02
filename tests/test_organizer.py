@@ -1032,6 +1032,20 @@ def test_ark_faces_cluster_detail_bands_unnamed_faces_by_similarity_in_shooting_
     assert ark_faces.list_clusters(conn)[0]['latest'] == '2021-03-04', "the newest photo's date folder"
 
 
+def test_ark_faces_knn_scores_a_face_against_the_persons_closest_named_faces():
+    from photo_organizer.analysis import ark_faces
+    from photo_organizer.analysis.ark import _centroid
+    rng = np.random.default_rng(4)
+    unit = lambda v: (v / np.linalg.norm(v, axis=-1, keepdims=True)).astype(np.float32)
+    young, older = unit(rng.normal(size=512)), unit(rng.normal(size=512))
+    jitter = lambda c, n: unit(c + 0.3 * rng.normal(size=(n, 512)) / np.sqrt(512))
+    named = np.vstack([jitter(young, 20), jitter(older, 3)])      # mostly named as a child
+    face = jitter(older, 1)                                        # a new photo of them older
+    knn = ark_faces._knn(face, named, k=3)[0]
+    assert knn > 0.9, "matched against the older photos"
+    assert float(face[0] @ _centroid(named)) < 0.5, "the average face is mostly the child"
+
+
 def test_ark_faces_cluster_detail_shows_a_burst_of_the_same_second_once(tmp_path):
     from photo_organizer.analysis import ark, ark_faces
     conn = ark.open_db(str(tmp_path / 'analysis.db'))

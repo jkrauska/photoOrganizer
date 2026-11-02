@@ -28,6 +28,7 @@ FULL_MAX_SIDE = 2048
 GUESS_MIN = 0.55
 GUESS_MARGIN = 0.15
 LATEST_MAX_AGE = 60     # seconds a cluster's newest photo date may lag behind new faces
+KNN = 10                # a face is scored against this many of a person's closest named faces
 BURST_IOU = 0.5         # face boxes overlapping this much in photos of the same second: one shot
 
 
@@ -125,27 +126,43 @@ def list_clusters(conn):
     return items + ([tail] if tail else [])
 
 
-def _person_centroid(conn, pid):
+def _person_faces(conn, pid):
+    """Unit embedding rows of the faces named by hand as this person, or None."""
     es = [_unpack(r[0]) for r in conn.execute(
         "SELECT embedding FROM faces WHERE person_id = ? AND person_source = 'manual' "
         "AND embedding IS NOT NULL", (pid,))]
-    return _centroid(_unit_rows(es)) if es else None
+    return _unit_rows(es) if es else None
+
+
+def _knn(X, P, k=KNN, chunk=1024):
+    """Each row of X against a person's named faces P: the mean of its k best cosines. Unlike one
+    average face, this compares a face with the person at a similar age and angle."""
+    k = min(k, len(P))
+    out = np.empty(len(X), dtype=np.float32)
+    for i in range(0, len(X), chunk):
+        S = X[i:i + chunk] @ P.T
+        out[i:i + chunk] = np.partition(S, -k, axis=1)[:, -k:].mean(axis=1)
+    return out
 
 
 def _reference(conn, cid, rows):
-    """(name, unit vector) the cluster's unnamed faces are compared with: the cluster's name, else
-    the guessed name, else (name '') the average of the cluster's own faces."""
+    """(name, scorer) for the cluster's unnamed faces: scorer(unit rows) gives each one's
+    similarity to the cluster's name, else the guessed name (both by _knn), else (name '') to
+    the average of the cluster's own faces."""
     pid, name = _cluster_name(conn, cid)
     if not name:
         g = guess_cluster(conn, cid)
         if g:
             name = g['name']
             pid = conn.execute("SELECT id FROM persons WHERE name = ?", (name,)).fetchone()[0]
-    ref = _person_centroid(conn, pid) if name else None
-    if ref is None:
-        es = [_unpack(r['embedding']) for r in rows if r['embedding'] is not None]
-        name, ref = '', (_centroid(_unit_rows(es)) if es else None)
-    return name, ref
+    P = _person_faces(conn, pid) if name else None
+    if P is not None:
+        return name, lambda X: _knn(X, P)
+    es = [_unpack(r['embedding']) for r in rows if r['embedding'] is not None]
+    if not es:
+        return '', None
+    ref = _centroid(_unit_rows(es))
+    return '', lambda X: X @ ref
 
 
 def taken_times(catalog_path, shas):
@@ -228,12 +245,12 @@ def cluster_detail(conn, cid, limit=500, catalog_path=None):
     named = [r for r in rows if r['person_source'] == 'manual']
     sim, sim_to, taken, bursts = {}, '', {}, {}
     if cid != UNCLUSTERED and todo:
-        sim_to, ref = _reference(conn, cid, rows)
-        if ref is not None:
+        sim_to, scorer = _reference(conn, cid, rows)
+        if scorer is not None:
             have = [r for r in todo if r['embedding'] is not None]
             if have:
                 sim = dict(zip([r['id'] for r in have],
-                               (_unit_rows([_unpack(r['embedding']) for r in have]) @ ref).tolist()))
+                               scorer(_unit_rows([_unpack(r['embedding']) for r in have])).tolist()))
             taken = taken_times(catalog_path, {r['sha256'] for r in todo})
             bursts = _bursts(todo, taken)
             hidden = {i for ids in bursts.values() for i in ids}
@@ -345,17 +362,15 @@ def full_image(conn, face_id, max_side=FULL_MAX_SIDE, box=True):
     return buf.getvalue()
 
 
-def _person_centroids(conn, min_faces=3):
-    """(person ids, names, unit centroid rows) of people with enough hand-named faces."""
+def _named_faces(conn, min_faces=3):
+    """(person ids, names, {person id: unit rows}) of people with enough hand-named faces."""
     by_person = {}
     for r in conn.execute("SELECT person_id, embedding FROM faces "
                           "WHERE person_source = 'manual' AND embedding IS NOT NULL"):
         by_person.setdefault(r['person_id'], []).append(_unpack(r['embedding']))
     pids = sorted(p for p, es in by_person.items() if len(es) >= min_faces)
-    if not pids:
-        return [], [], None
     names = dict(conn.execute("SELECT id, name FROM persons").fetchall())
-    return pids, [names[p] for p in pids], np.stack([_centroid(_unit_rows(by_person[p])) for p in pids])
+    return pids, [names[p] for p in pids], {p: _unit_rows(by_person[p]) for p in pids}
 
 
 def _unnamed_in_cluster(conn, cid):
@@ -365,18 +380,20 @@ def _unnamed_in_cluster(conn, cid):
 
 
 def guess_cluster(conn, cid, min_score=GUESS_MIN, margin=GUESS_MARGIN):
-    """{'name', 'score'} when an unnamed cluster clearly looks like someone already named, else None.
+    """{'name', 'score'} when an unnamed cluster clearly looks like someone already named, else None:
+    the average of its unnamed faces against each person's closest named faces (_knn).
     People that most of the cluster's unnamed faces were said not to be are skipped."""
     if cid == UNCLUSTERED or _cluster_name(conn, cid)[1]:
         return None
     rows = _unnamed_in_cluster(conn, cid)
-    pids, names, C = _person_centroids(conn)
-    if not rows or C is None:
+    pids, names, faces = _named_faces(conn)
+    if not rows or not pids:
         return None
     marks = ','.join('?' * len(rows))
     said_no = dict(conn.execute(f"SELECT person_id, COUNT(*) FROM face_not_person WHERE face_id IN ({marks}) "
                                 f"GROUP BY person_id", [r['id'] for r in rows]).fetchall())
-    s = C @ _centroid(_unit_rows([_unpack(r['embedding']) for r in rows]))
+    q = _centroid(_unit_rows([_unpack(r['embedding']) for r in rows]))[None, :]
+    s = np.array([_knn(q, faces[p])[0] for p in pids])
     for i, p in enumerate(pids):
         if said_no.get(p, 0) * 2 >= len(rows):
             s[i] = -1.0
