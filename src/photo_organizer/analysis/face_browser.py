@@ -14,6 +14,7 @@ ark.py and ark_faces.py): names go to persons + faces.person_id, and it binds 12
 import argparse
 import json
 import os
+import sqlite3
 import webbrowser
 from contextlib import closing
 from pathlib import Path
@@ -23,7 +24,7 @@ import pillow_heif
 import uvicorn
 from PIL import Image
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from photo_organizer.analysis import ark_faces
@@ -369,6 +370,11 @@ def make_ark_app(db_path, crop_dir) -> FastAPI:
     ark_faces.ensure_db(db_path)
     ark = FastAPI()
 
+    @ark.exception_handler(sqlite3.OperationalError)
+    def db_busy(request, exc):
+        return JSONResponse({"detail": f"{exc} - another process is writing {db_path}; try again"},
+                            status_code=503)
+
     def db():
         return closing(ark_faces.connect(db_path))
 
@@ -473,8 +479,16 @@ let clusters = [];
 let currentId = null;
 let faces = [];
 
-const post = (url, body) => fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                       body: JSON.stringify(body)}).then(r => r.json());
+async function post(url, body) {
+  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                              body: JSON.stringify(body)});
+  if (!r.ok) {
+    const msg = `Save failed (${r.status}): ${await r.text()}`;
+    alert(msg);
+    throw new Error(msg);
+  }
+  return r.json();
+}
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));

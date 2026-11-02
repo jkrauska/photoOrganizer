@@ -206,28 +206,24 @@ def _list_json(v):
 
 
 def analyze_one(conn, sha, path, face_fn=None, vlm_fn=None, vlm_name=None, tmpdir=None):
-    """Run the stages not yet done for this image; commits once at the end. Returns faces found."""
+    """Run the stages not yet done for this image. The models run before anything is written, so
+    the write lock is held only for the short final transaction (the face UI writes to this DB
+    too). Returns faces found."""
     row = conn.execute("SELECT faces_at, vlm_at FROM images WHERE sha256 = ?", (sha,)).fetchone()
     need_faces = face_fn is not None and not (row and row['faces_at'])
     need_vlm = vlm_fn is not None and not (row and row['vlm_at'])
     if not (need_faces or need_vlm):
         return None
-    conn.execute("INSERT INTO images (sha256, path) VALUES (?, ?) ON CONFLICT(sha256) DO UPDATE SET path = ?",
-                 (sha, path, path))
+    upsert = "INSERT INTO images (sha256, path) VALUES (?, ?) ON CONFLICT(sha256) DO UPDATE SET path = ?"
     try:
         im, source = load_image(path)
     except Exception as e:
+        conn.execute(upsert, (sha, path, path))
         conn.execute("UPDATE images SET error = ? WHERE sha256 = ?", (f"load: {e}", sha))
         conn.commit()
         return None
-    conn.execute("UPDATE images SET width = ?, height = ?, source = ?, error = NULL WHERE sha256 = ?",
-                 (im.width, im.height, source, sha))
-    n_faces = None
-    if need_faces:
-        faces = face_fn(im)
-        _store_faces(conn, sha, faces)
-        n_faces = len(faces)
-        conn.execute(f"UPDATE images SET face_model = ?, faces_at = {NOW} WHERE sha256 = ?", (FACE_MODEL, sha))
+    faces = face_fn(im) if need_faces else None
+    r = None
     if need_vlm:
         small = im.copy()
         small.thumbnail((VLM_MAX_SIDE, VLM_MAX_SIDE))
@@ -237,6 +233,13 @@ def analyze_one(conn, sha, path, face_fn=None, vlm_fn=None, vlm_name=None, tmpdi
             r = vlm_fn(tmp)
         finally:
             os.unlink(tmp)
+    conn.execute(upsert, (sha, path, path))
+    conn.execute("UPDATE images SET width = ?, height = ?, source = ?, error = NULL WHERE sha256 = ?",
+                 (im.width, im.height, source, sha))
+    if faces is not None:
+        _store_faces(conn, sha, faces)
+        conn.execute(f"UPDATE images SET face_model = ?, faces_at = {NOW} WHERE sha256 = ?", (FACE_MODEL, sha))
+    if r is not None:
         raw = r.get('_raw_response') if r.get('_parse_error') else None
         conn.execute(
             f"UPDATE images SET caption = ?, scene = ?, setting = ?, text_visible = ?, keywords = ?, subjects = ?, "
@@ -244,7 +247,7 @@ def analyze_one(conn, sha, path, face_fn=None, vlm_fn=None, vlm_name=None, tmpdi
             (r.get('caption'), r.get('scene'), r.get('setting'), r.get('text_visible'),
              _list_json(r.get('keywords')), _list_json(r.get('subjects')), vlm_name, raw, sha))
     conn.commit()
-    return n_faces
+    return None if faces is None else len(faces)
 
 
 def run(conn, images, face_fn=None, vlm_fn=None, vlm_name=None, log=print):
