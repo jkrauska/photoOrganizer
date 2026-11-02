@@ -32,13 +32,14 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
-.PHONY: help sync inventory run queue queue-list worker worker-bg stop verify status enrich faces browse test \
+.PHONY: help sync inventory run queue set-date queue-list worker worker-bg stop verify status enrich faces browse test \
 	ark-faces ark-describe ark-seed ark-stats
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
 	@echo "make run        move into DEST, verify, delete sources (LIMIT=n, YES=1 to skip prompts)"
 	@echo "make queue SRC=\"/path/a,/path/b\"   add folders to the live queue (any time)"
+	@echo "make set-date SRC=/path DATE=YYYY-MM-DD   write that date into a folder's undated files (EXIF), then queue it"
 	@echo "make queue-list show the queue"
 	@echo "make worker     process the queue in order, then wait for more (worker-bg: in background)"
 	@echo "make stop       stop a running inventory/run/worker gracefully (in-flight files finish)"
@@ -69,6 +70,10 @@ run: sync | $(LOGDIR)
 queue: sync
 	@test -n "$(SRC)" || { echo 'usage: make queue SRC="/path/one,/path/two"'; exit 2; }
 	@IFS=',' read -ra src <<< "$(SRC)"; $(QUEUE) add $(if $(KEEP),--keep-sources) "$${src[@]}"
+
+set-date: sync
+	@test -n "$(SRC)" -a -n "$(DATE)" || { echo 'usage: make set-date SRC=/path DATE=YYYY-MM-DD'; exit 2; }
+	@$(QUEUE) set-date "$(SRC)" "$(DATE)"
 
 queue-list: sync
 	@$(QUEUE) list

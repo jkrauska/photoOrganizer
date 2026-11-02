@@ -15,6 +15,7 @@ import datetime
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -56,6 +57,33 @@ def enqueue(conn, path, dest=None, keep_sources=False):
     conn.execute("INSERT INTO queue (source, keep_sources) VALUES (?, ?)", (src, int(keep)))
     conn.commit()
     return src, f"queued{' (copy-only)' if keep else ''}: {src}"
+
+
+def set_folder_date(conn, folder, day):
+    """Write day (YYYY-MM-DD, noon) into the capture-date EXIF of the files under folder left for
+    review (no reliable date), then drop their catalog rows so the next run rescans them and
+    files them by that date like any dated photo. Viewers such as Immich see the date too.
+    Returns (dated, failed) lists of paths."""
+    stamp = datetime.date.fromisoformat(day).strftime('%Y:%m:%d') + ' 12:00:00'
+    folder = os.path.abspath(os.path.expanduser(folder)).rstrip('/')
+    if is_time_machine_path(folder):
+        raise ValueError("Time Machine backups are read-only; copy the files out first")
+    rows = conn.execute(
+        "SELECT id, original_path FROM files WHERE status = 'review' AND original_path LIKE ? ESCAPE '\\'",
+        (folder.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '/%',),
+    ).fetchall()
+    dated, failed = [], []
+    for r in rows:
+        # -P keeps the file's modified time; AllDates = DateTimeOriginal, CreateDate, ModifyDate.
+        res = subprocess.run(['exiftool', '-q', '-q', '-P', '-overwrite_original', f'-AllDates={stamp}',
+                              r['original_path']], capture_output=True, text=True)
+        if res.returncode == 0:
+            conn.execute("DELETE FROM files WHERE id = ?", (r['id'],))
+            dated.append(r['original_path'])
+        else:
+            failed.append((r['original_path'], res.stderr.strip() or f"exiftool exit {res.returncode}"))
+    conn.commit()
+    return dated, failed
 
 
 def add(conn, paths, dest=None, keep_sources=False):
@@ -211,6 +239,9 @@ def main():
     p_add.add_argument('--keep-sources', action='store_true',
                        help='Copy-only: never delete the originals (always on for Time Machine backups)')
     sub.add_parser('list')
+    p_date = sub.add_parser('set-date', help="Write a capture date into a folder's undated files' EXIF, then queue it")
+    p_date.add_argument('path')
+    p_date.add_argument('date', help='YYYY-MM-DD')
     p_rm = sub.add_parser('remove')
     p_rm.add_argument('id', type=int)
     p_w = sub.add_parser('worker')
@@ -226,6 +257,14 @@ def main():
     conn = init_db(args.db)
     if args.cmd == 'add':
         add(conn, args.paths, keep_sources=args.keep_sources)
+        list_queue(conn)
+    elif args.cmd == 'set-date':
+        dated, failed = set_folder_date(conn, args.path, args.date)
+        print(f"  {len(dated):,} undated files under {args.path} now have EXIF date {args.date}")
+        for path, err in failed:
+            print(f"  not changed: {path}: {err}")
+        if dated:
+            add(conn, [args.path])
         list_queue(conn)
     elif args.cmd == 'list':
         list_queue(conn)
