@@ -37,7 +37,7 @@ BRANDS = {'sony': 'Sony', 'apple': 'Apple', 'canon': 'Canon', 'nikon corporation
 
 def camera_name(make, model):
     """Friendly camera name: 'ILCE-1' -> 'Sony A1', 'ILCE-7RM4' -> 'Sony A7R IV', 'iPhone 17 Pro' as is."""
-    make, model = (make or '').strip(), (model or '').strip()
+    make, model = (make or '').strip(), re.sub(r'\s*\(V[\d.]+\)$', '', (model or '').strip())   # '(V03.30)': firmware
     if not model:
         return BRANDS.get(make.lower(), make) or None
     brand = BRANDS.get(make.lower(), make.title() if make.isupper() else make)

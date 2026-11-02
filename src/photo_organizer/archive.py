@@ -43,7 +43,11 @@ def archive_snapshot(db_path):
     conn = _connect(db_path)
     try:
         years, months, total = defaultdict(_empty), defaultdict(_empty), _empty()
-        for r in conn.execute("SELECT dest_path, filename, file_size FROM files WHERE status = 'done'"):
+        cameras = defaultdict(lambda: {'files': 0, 'years': defaultdict(int), 'lenses': defaultdict(int)})
+        unread = 0
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+        cam_cols = "camera, lens_model, camera_read_at" if 'camera' in cols else "NULL camera, NULL lens_model, 1 camera_read_at"
+        for r in conn.execute(f"SELECT dest_path, filename, file_size, {cam_cols} FROM files WHERE status = 'done'"):
             m = DAY_RE.search(r['dest_path'] or '')
             if not m:
                 continue
@@ -51,6 +55,16 @@ def archive_snapshot(db_path):
             _add(years[m.group(1)], kind, size)
             _add(months[f"{m.group(1)}-{m.group(2)}"], kind, size)
             _add(total, kind, size)
+            if kind == 'other':         # sidecars name no camera
+                continue
+            if r['camera_read_at'] is None:
+                unread += 1
+                continue
+            c = cameras[r['camera'] or '']
+            c['files'] += 1
+            c['years'][m.group(1)] += 1
+            if r['lens_model']:
+                c['lenses'][r['lens_model']] += 1
         left = {r['status']: r['n'] for r in conn.execute(
             "SELECT status, COUNT(*) AS n FROM files WHERE status IN ('pending', 'review', 'ignored', 'error') "
             "GROUP BY status")}
@@ -63,9 +77,35 @@ def archive_snapshot(db_path):
             'total': total, 'dest': dest, 'left': left,
             'years': [{'year': y, **v} for y, v in sorted(years.items())],
             'months': {k: v for k, v in sorted(months.items())},
+            'cameras': _camera_rows(cameras), 'camera_unread': unread,
         }
     finally:
         conn.close()
+
+
+CAMERA_ROWS = 30
+
+
+def _camera_rows(cameras):
+    """Most-used cameras (oldest first, by first year), the rest folded into 'Other cameras';
+    files naming no camera last. Each: files, years {year: n}, top lenses."""
+    def row(name, c):
+        ys = sorted(c['years'])
+        return {'camera': name, 'files': c['files'], 'years': dict(c['years']), 'first': ys[0], 'last': ys[-1],
+                'lenses': sorted(c['lenses'].items(), key=lambda kv: -kv[1])[:8]}
+    named = sorted(((n, c) for n, c in cameras.items() if n), key=lambda nc: -nc[1]['files'])
+    rows = [row(n, c) for n, c in named[:CAMERA_ROWS]]
+    rows.sort(key=lambda r: (r['first'], -r['files']))
+    if named[CAMERA_ROWS:]:
+        other = {'files': 0, 'years': defaultdict(int), 'lenses': defaultdict(int)}
+        for _, c in named[CAMERA_ROWS:]:
+            other['files'] += c['files']
+            for y, n in c['years'].items():
+                other['years'][y] += n
+        rows.append({**row(f"Other cameras ({len(named) - CAMERA_ROWS})", other), 'lenses': []})
+    if '' in cameras:
+        rows.append({**row('(no camera tag)', cameras['']), 'lenses': []})
+    return rows
 
 
 def month_detail(db_path, ym):
@@ -144,6 +184,13 @@ th { color:var(--muted); font-weight:500; border-top:none; } td.n, th.n { text-a
 #tip { position:fixed; pointer-events:none; background:var(--card); color:var(--fg); border:1px solid var(--line);
   border-radius:8px; padding:6px 9px; font-size:12px; box-shadow:0 4px 14px rgba(0,0,0,.18); display:none; z-index:10;
   font-variant-numeric:tabular-nums; }
+.camwrap { overflow-x:auto; }
+.cams { display:grid; gap:2px; align-items:center; }
+.cams .h { font-size:10px; color:var(--muted); text-align:center; writing-mode:vertical-rl; transform:rotate(180deg); height:34px; }
+.cams .name { font-size:12px; white-space:nowrap; padding-right:10px; cursor:pointer; }
+.cams .name.dim { color:var(--muted); cursor:default; } .cams .name.sel { font-weight:650; }
+.cams .c { height:18px; border-radius:3px; background:var(--empty); }
+.cams .t { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; padding-left:10px; white-space:nowrap; }
 details summary { cursor:pointer; color:var(--muted); font-size:12px; margin-top:10px; }
 </style></head><body><main>
 <header><h1>Photo Archive</h1><nav><a href="/">Status</a><a href="/archive" class="on">Archive</a></nav>
@@ -156,6 +203,8 @@ details summary { cursor:pointer; color:var(--muted); font-size:12px; margin-top
     <p class="s">Click a month to list its days.</p></div>
 </div>
 <div class="card" id="monthcard" style="display:none"><h2 id="mtitle"></h2><table id="mtable"></table></div>
+<div class="card"><h2>Cameras by year</h2><p class="s" id="camnote"></p><div class="camwrap"><div class="cams" id="cams"></div></div>
+  <div class="scale" id="camscale"></div><div id="lenses" style="margin-top:12px"></div></div>
 <div id="tip"></div>
 </main>
 <script>
@@ -226,6 +275,49 @@ async function load() {
   const sc = $('scale'); sc.replaceChildren(el('span', '', 'fewer'));
   for (let i = 1; i <= 7; i++) { const s=el('i'); s.style.background=`var(--q${i})`; sc.append(s); }
   sc.append(el('span', '', 'more files per month'));
+  drawCameras(d, ys.map(y => y.year));
+}
+
+let camSel = null;
+function drawCameras(d, years) {
+  const rows = d.cameras || [];
+  $('camnote').textContent = (rows.length ? 'Photos and videos per camera per year (sidecars not counted). Click a camera for its lenses.' : 'No camera data yet.')
+    + (d.camera_unread ? ` ${num(d.camera_unread)} stored files not read yet (make cameras).` : '');
+  const g = $('cams'); g.replaceChildren();
+  g.style.gridTemplateColumns = `auto repeat(${years.length}, minmax(12px, 1fr)) auto`;
+  g.append(el('div'));
+  years.forEach(y => g.append(el('div', 'h', y)));
+  g.append(el('div'));
+  const cells = rows.flatMap(r => Object.values(r.years)).sort((a, b) => a - b);
+  const q = p => cells.length ? cells[Math.min(cells.length - 1, Math.floor(p * cells.length))] : 0;
+  const cuts = [1/7, 2/7, 3/7, 4/7, 5/7, 6/7].map(q);
+  const step = n => 1 + cuts.filter(c => n > c).length;
+  rows.forEach(r => {
+    const named = !r.camera.startsWith('(') && !r.camera.startsWith('Other cameras');
+    const nm = el('div', 'name' + (named ? '' : ' dim') + (r.camera === camSel ? ' sel' : ''), r.camera);
+    if (named) nm.addEventListener('click', () => { camSel = r.camera; drawCameras(d, years); });
+    g.append(nm);
+    years.forEach(y => {
+      const n = r.years[y], c = el('div', 'c');
+      if (n) {
+        c.style.background = `var(--q${step(n)})`;
+        c.addEventListener('mousemove', ev => showTip(ev, [`${r.camera} · ${y}`, `${num(n)} files`]));
+        c.addEventListener('mouseleave', hideTip);
+      }
+      g.append(c);
+    });
+    g.append(el('div', 't', `${num(r.files)} · ${r.first === r.last ? r.first : r.first + '–' + r.last}`));
+  });
+  const sc = $('camscale'); sc.replaceChildren(el('span', '', 'fewer'));
+  for (let i = 1; i <= 7; i++) { const s=el('i'); s.style.background=`var(--q${i})`; sc.append(s); }
+  sc.append(el('span', '', 'more files per camera-year'));
+  const sel = rows.find(r => r.camera === camSel), box = $('lenses'); box.replaceChildren();
+  if (!sel) return;
+  box.append(el('h2', '', `${sel.camera} · lenses`));
+  if (!sel.lenses.length) { box.append(el('p', 's', 'No lens recorded.')); return; }
+  const t = el('table'), hr = el('tr'); ['Lens', 'Files'].forEach((h, i) => hr.append(el('th', i ? 'n' : '', h))); t.append(hr);
+  sel.lenses.forEach(([lens, n]) => { const tr = el('tr'); tr.append(el('td', '', lens), el('td', 'n', num(n))); t.append(tr); });
+  box.append(t);
 }
 
 async function showMonth(ym) {

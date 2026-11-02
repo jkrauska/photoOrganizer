@@ -20,6 +20,7 @@ def test_friendly_camera_names():
     assert camera_name('Canon', 'Canon PowerShot S3 IS') == 'Canon PowerShot S3 IS'
     assert camera_name('NIKON CORPORATION', 'NIKON D750') == 'Nikon D750'
     assert camera_name('FUJIFILM', 'X-T4') == 'Fujifilm X-T4'
+    assert camera_name('EASTMAN KODAK COMPANY', 'KODAK DC210 ZOOM (V03.30)') == 'Kodak DC210 ZOOM'
 
 
 class FakeFS:
@@ -76,3 +77,21 @@ def test_scan_records_the_camera_of_new_files(env):
     by_name = {r['filename']: r for r in rows().values()}
     assert by_name['IMG_1.jpg']['camera'] == 'Sony A9' and by_name['IMG_1.jpg']['lens_model'] == 'FE 24-105mm F4 G OSS'
     assert by_name['IMG_2.jpg']['camera'] is None and by_name['IMG_2.jpg']['camera_read_at']   # read, no tags
+
+
+def test_archive_counts_files_per_camera_per_year(env, tmp_path):
+    import subprocess
+    from photo_organizer.archive import archive_snapshot
+    src, dest, go, _ = env
+    for i, (date, model) in enumerate([("2019:03:02 10:00:00", 'ILCE-9'), ("2020:03:02 10:00:00", 'ILCE-9'),
+                                       ("2020:05:02 10:00:00", 'ILCE-1')]):
+        make_jpeg(f"{src}/IMG_{i}.jpg", date, (i * 40, 5, 5))
+        subprocess.run(['exiftool', '-q', '-overwrite_original', '-Make=SONY', f'-Model={model}',
+                        '-LensModel=FE 24-105mm F4 G OSS', f"{src}/IMG_{i}.jpg"], check=True)
+    make_jpeg(f"{src}/IMG_9.jpg", "2020:06:02 10:00:00", (200, 5, 5))
+    open(f"{src}/IMG_9.jpg.xmp", 'w').write('<x/>')          # sidecars aren't counted
+    go()
+    rows = {r['camera']: r for r in archive_snapshot(str(tmp_path / 'local' / 'catalog.db'))['cameras']}
+    assert rows['Sony A9']['years'] == {'2019': 1, '2020': 1}
+    assert rows['Sony A9']['lenses'] == [('FE 24-105mm F4 G OSS', 2)]
+    assert rows['Sony A1']['first'] == '2020' and rows['(no camera tag)']['files'] == 1
