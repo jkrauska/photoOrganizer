@@ -548,7 +548,7 @@ ARK_HTML = r"""<!doctype html>
   </div>
   <div id="list"><div class="empty">Loading…</div></div>
 </div>
-<div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li><li>Double-click a crop to see the whole photo (Esc or click to close).</li><li>Strangers or false detections: ✕ on a crop forgets it; click crops to select several, then <b>Forget selected</b>. Forgotten faces are deleted from the database.</li></ol></div></div>
+<div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li><li>Double-click a crop to see the whole photo; ← → step through the group's photos, Esc or click closes.</li><li>Strangers or false detections: ✕ on a crop forgets it; click crops to select several, then <b>Forget selected</b>. Forgotten faces are deleted from the database.</li></ol></div></div>
 <script>
 let clusters = [];
 let currentId = null;
@@ -678,24 +678,45 @@ async function loadFaces() {
   });
 }
 
-function openViewer(id) {
+let viewerId = null;
+
+function openViewer(id, fromDblClick = true) {
   const f = faces.find(x => x.id === id);
   // A double-click also fires two clicks; put the selection back the way it was.
-  document.querySelector(`#grid figure[data-id="${id}"]`)?.classList.remove('selected');
-  renderForgetRow();
+  if (fromDblClick) {
+    document.querySelector(`#grid figure[data-id="${id}"]`)?.classList.remove('selected');
+    renderForgetRow();
+  }
+  viewerId = id;
   const v = document.getElementById('viewer');
   v.querySelector('img').src = `/photo/${id}.jpg`;
-  v.querySelector('div').textContent = f ? f.path : '';
+  const pos = faces.findIndex(x => x.id === id);
+  v.querySelector('div').textContent = (f ? f.path : '') +
+    (pos >= 0 ? `  ·  ${pos + 1} of ${faces.length}  ·  ← → to move, Esc to close` : '');
   v.classList.add('open');
+  // Warm the next photo so arrowing forward is quick.
+  if (pos >= 0 && pos + 1 < faces.length) new Image().src = `/photo/${faces[pos + 1].id}.jpg`;
+}
+
+function stepViewer(delta) {
+  const pos = faces.findIndex(x => x.id === viewerId);
+  const next = faces[pos + delta];
+  if (pos >= 0 && next) openViewer(next.id, false);
 }
 
 function closeViewer() {
   const v = document.getElementById('viewer');
+  viewerId = null;
   v.classList.remove('open');
   v.querySelector('img').removeAttribute('src');
 }
 
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
+document.addEventListener('keydown', e => {
+  if (viewerId === null) return;
+  if (e.key === 'Escape') closeViewer();
+  else if (e.key === 'ArrowRight') { e.preventDefault(); stepViewer(1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); stepViewer(-1); }
+});
 
 let guess = null;
 
