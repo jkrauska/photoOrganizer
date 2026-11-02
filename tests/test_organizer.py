@@ -790,3 +790,30 @@ def test_ark_face_browser_app_names_over_http(tmp_path):
     client.post('/api/label_face', json={'face_id': 3, 'label': ''})
     assert client.post('/api/forget', json={'cluster_id': 'c0'}).json()['deleted'] == 1
     assert client.post('/api/forget', json={'cluster_id': 'bad'}).status_code == 404
+
+
+def test_ark_cluster_splits_chains_of_look_alikes(tmp_path):
+    from sklearn.cluster import DBSCAN
+    from photo_organizer.analysis import ark
+    rng = np.random.default_rng(1)
+    u, v = np.linalg.qr(rng.normal(size=(512, 2)))[0].T
+    # four people 55 degrees apart on a circle: neighbours are within eps 0.5 (cosine distance
+    # 0.43), so plain DBSCAN chains all four into one cluster
+    faces = []
+    for k in range(4):
+        t = np.radians(55 * k)
+        centre = np.cos(t) * u + np.sin(t) * v
+        for _ in range(10):
+            e = centre + 0.02 * rng.normal(size=512) / np.sqrt(512)
+            faces.append((k, (e / np.linalg.norm(e)).astype(np.float32)))
+    X = np.stack([e for _, e in faces])
+    assert len(set(DBSCAN(eps=0.5, min_samples=3, metric='cosine').fit_predict(X))) == 1
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    conn.execute("INSERT INTO images (sha256, path) VALUES ('h', '/p')")
+    for i, (_, e) in enumerate(faces):
+        conn.execute("INSERT INTO faces (sha256, face_idx, det_score, embedding) VALUES ('h', ?, 0.9, ?)",
+                     (i, e.tobytes()))
+    assert ark.cluster_faces(conn) == 4
+    got = [r[0] for r in conn.execute("SELECT cluster_id FROM faces ORDER BY face_idx")]
+    assert [len(set(got[k * 10:(k + 1) * 10])) for k in range(4)] == [1, 1, 1, 1]
+    assert len(set(got)) == 4

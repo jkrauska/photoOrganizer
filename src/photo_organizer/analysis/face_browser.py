@@ -507,15 +507,52 @@ ARK_HTML = r"""<!doctype html>
   .sugg button { padding: 2px 8px; font-size: 12px; }
   .empty { color: #999; padding: 40px; text-align: center; }
   #stats { color: #888; font-size: 12px; padding: 6px 4px; }
+  #sortbar { display: flex; align-items: center; gap: 6px; padding: 4px; font-size: 12px; color: #555; }
+  #sortbar select { flex: 1; font-size: 13px; padding: 4px; }
 </style></head><body>
 <datalist id="persons"></datalist>
 <div id="viewer" onclick="closeViewer()"><img alt="Loading photo…"><div></div></div>
-<div id="sidebar"><div class="empty">Loading…</div></div>
+<div id="sidebar">
+  <div id="sortbar">Sort
+    <select id="sort" onchange="setSort(this.value)">
+      <option value="count">Most faces</option>
+      <option value="unnamed">Unnamed first, most faces</option>
+      <option value="named">Named first, most faces</option>
+      <option value="name">Name A–Z</option>
+      <option value="suggested">Most suggestions</option>
+      <option value="fewest">Fewest faces</option>
+    </select>
+  </div>
+  <div id="list"><div class="empty">Loading…</div></div>
+</div>
 <div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li><li>Double-click a crop to see the whole photo (Esc or click to close).</li><li>Strangers or false detections: ✕ on a crop forgets it; click crops to select several, then <b>Forget selected</b>. Forgotten faces are deleted from the database.</li></ol></div></div>
 <script>
 let clusters = [];
 let currentId = null;
 let faces = [];
+let sortBy = 'count';
+try { sortBy = localStorage.getItem('arkSort') || 'count'; } catch (e) {}
+
+const SORTS = {
+  count: (a, b) => b.count - a.count,
+  fewest: (a, b) => a.count - b.count,
+  unnamed: (a, b) => (!!a.label - !!b.label) || b.count - a.count,
+  named: (a, b) => (!!b.label - !!a.label) || b.count - a.count,
+  name: (a, b) => (!!b.label - !!a.label) || a.label.localeCompare(b.label) || b.count - a.count,
+  suggested: (a, b) => b.suggested - a.suggested || b.count - a.count,
+};
+
+function sortedClusters() {
+  // Unclustered stays at the bottom whatever the order.
+  const real = clusters.filter(c => c.id !== 'unclustered').sort(SORTS[sortBy] || SORTS.count);
+  return real.concat(clusters.filter(c => c.id === 'unclustered'));
+}
+
+function setSort(v) {
+  sortBy = v;
+  try { localStorage.setItem('arkSort', v); } catch (e) {}
+  renderSidebar();
+}
 
 async function post(url, body) {
   const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -543,11 +580,12 @@ async function loadPersons() {
 }
 
 function renderSidebar() {
-  const sb = document.getElementById('sidebar');
+  const sb = document.getElementById('list');
+  document.getElementById('sort').value = sortBy;
   const named = clusters.filter(c => c.label).length;
   const real = clusters.filter(c => c.id !== 'unclustered').length;
   sb.innerHTML = `<div id="stats">${named}/${real} clusters named · click one to name it</div>` +
-    clusters.map(c => `
+    sortedClusters().map(c => `
       <div class="item ${c.id===currentId?'active':''}" onclick="selectCluster('${c.id}')">
         <img src="${c.sample}" loading="lazy">
         <div class="meta">
@@ -699,8 +737,10 @@ async function saveLabel(advance) {
   await post('/api/label', {cluster_id: currentId, label});
   await loadClusters();
   if (advance) {
-    const idx = clusters.findIndex(x => x.id === currentId);
-    const next = clusters.slice(idx + 1).find(x => !x.label && x.id !== 'unclustered');
+    const order = sortedClusters();
+    const idx = order.findIndex(x => x.id === currentId);
+    const next = order.slice(idx + 1).find(x => !x.label && x.id !== 'unclustered')
+              || order.find(x => !x.label && x.id !== 'unclustered' && x.id !== currentId);
     if (next) return selectCluster(next.id);
   }
   await loadFaces();

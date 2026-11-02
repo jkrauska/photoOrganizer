@@ -388,20 +388,40 @@ def _person_id(conn, name):
     return conn.execute("SELECT id FROM persons WHERE name = ?", (name,)).fetchone()[0]
 
 
-def cluster_faces(conn, eps=0.5, min_samples=3, min_score=0.6):
-    """DBSCAN (cosine) over confidently detected faces; writes cluster_id. Returns cluster count."""
+def _coherent(M, trim=0.45, min_frac=0.75):
+    """True when most faces sit near the group's centre. One person's faces measure ~0.9 here;
+    a DBSCAN chain of look-alikes (A~B~C~...) measures far lower (0.28 for a 14k-face chain)."""
+    return float(np.mean(M @ _centroid(M) >= trim)) >= min_frac
+
+
+def _dbscan_groups(X, idx, eps, min_samples, step=0.05, floor=0.3):
+    """DBSCAN (cosine) over X[idx]; any incoherent cluster is clustered again with a tighter eps."""
     from sklearn.cluster import DBSCAN
+    labels = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine').fit_predict(X[idx])
+    out = []
+    for c in set(labels) - {-1}:
+        members = idx[labels == c]
+        if eps - step >= floor - 1e-9 and not _coherent(X[members]):
+            out += _dbscan_groups(X, members, eps - step, min_samples, step, floor)
+        else:
+            out.append(members)
+    return out
+
+
+def cluster_faces(conn, eps=0.5, min_samples=3, min_score=0.6):
+    """Group confidently detected faces (DBSCAN, cosine, chains split apart) and write cluster_id,
+    numbered biggest first. Computes before writing, so the DB isn't locked meanwhile. Returns the
+    cluster count."""
     rows = conn.execute("SELECT id, embedding FROM faces WHERE det_score >= ?", (min_score,)).fetchall()
+    groups = []
+    if len(rows) >= min_samples:
+        X = _unit_rows([_unpack(r['embedding']) for r in rows])
+        groups = sorted(_dbscan_groups(X, np.arange(len(rows)), eps, min_samples), key=len, reverse=True)
     conn.execute("UPDATE faces SET cluster_id = NULL")
-    if len(rows) < min_samples:
-        conn.commit()
-        return 0
-    X = np.stack([_unpack(r['embedding']) for r in rows])
-    labels = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine').fit_predict(X)
     conn.executemany("UPDATE faces SET cluster_id = ? WHERE id = ?",
-                     [(int(c), r['id']) for c, r in zip(labels, rows) if c >= 0])
+                     [(c, rows[i]['id']) for c, g in enumerate(groups) for i in g])
     conn.commit()
-    return len(set(labels) - {-1})
+    return len(groups)
 
 
 def stats(conn):
