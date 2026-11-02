@@ -4,6 +4,7 @@ import sqlite3
 
 from photo_organizer.cameras import backfill, camera_name, unread
 from photo_organizer.db import init_db
+from test_organizer import env, make_jpeg  # noqa: F401  (env is a fixture)
 
 
 def test_friendly_camera_names():
@@ -59,3 +60,19 @@ def test_backfill_reads_in_batches_records_every_file_and_resumes(tmp_path):
     assert sum(r['camera'] == 'Sony A1' for r in rows) == 40
     assert all(r['camera_read_at'] for r in rows)                  # untagged files are not re-read
     assert unread(conn) == [] and backfill(conn, FakeFS(), readers=[FakeReader({})], out=lines.append) == (0, 0)
+
+
+def test_scan_records_the_camera_of_new_files(env):
+    import shutil
+    if not shutil.which('exiftool'):
+        return
+    import subprocess
+    src, dest, go, rows = env
+    make_jpeg(f"{src}/IMG_1.jpg", "2020:01:02 03:04:05")
+    subprocess.run(['exiftool', '-q', '-overwrite_original', '-Make=SONY', '-Model=ILCE-9', '-LensModel=FE 24-105mm F4 G OSS',
+                    f"{src}/IMG_1.jpg"], check=True)
+    make_jpeg(f"{src}/IMG_2.jpg", "2020:01:02 03:04:06", (90, 9, 9))
+    go()
+    by_name = {r['filename']: r for r in rows().values()}
+    assert by_name['IMG_1.jpg']['camera'] == 'Sony A9' and by_name['IMG_1.jpg']['lens_model'] == 'FE 24-105mm F4 G OSS'
+    assert by_name['IMG_2.jpg']['camera'] is None and by_name['IMG_2.jpg']['camera_read_at']   # read, no tags

@@ -75,12 +75,21 @@ def asset_files(p, sidecar_dir):
     files = [('original', p.path, name)]
     if p.has_raw and p.path_raw and os.path.exists(p.path_raw):
         files.append(('raw', p.path_raw, stem + os.path.splitext(p.path_raw)[1].upper()))
-    if p.live_photo and p.path_live_photo and os.path.exists(p.path_live_photo):
-        files.append(('live', p.path_live_photo, stem + os.path.splitext(p.path_live_photo)[1].upper()))
+    live = p.path_live_photo and str(p.path_live_photo)     # osxphotos sometimes returns a Path here
+    if p.live_photo and live and os.path.exists(live):
+        files.append(('live', live, stem + os.path.splitext(live)[1].upper()))
     if p.hasadjustments and p.path_edited and os.path.exists(p.path_edited):
         files.append(('edited', p.path_edited, f"{stem}_edited{os.path.splitext(p.path_edited)[1].upper()}"))
     files.append(('xmp', _write_sidecar(p, sidecar_dir), name + '.xmp'))
     return files
+
+
+def asset_camera(p):
+    """(make, model, lens, friendly name) from what Photos read from the file (all None if nothing)."""
+    from photo_organizer.cameras import camera_name
+    e = getattr(p, 'exif_info', None)
+    make, model, lens = ((getattr(e, a, None) or None) for a in ('camera_make', 'camera_model', 'lens_model'))
+    return make, model, lens, camera_name(make, model) if make or model else None
 
 
 def catalog_year(conn, source, db=None, sidecar_dir=None):
@@ -112,16 +121,19 @@ def catalog_year(conn, source, db=None, sidecar_dir=None):
                     (p.original_filename or p.uuid, group, source, taken, group, p.uuid, ICLOUD_ONLY))
                 review += 1
             continue
+        camera = asset_camera(p)
         for kind, path, filename in files:
             if path in known:
                 continue
             st = os.stat(path)
+            make, model, lens, name = camera if kind != 'xmp' else (None, None, None, None)
             cur = conn.execute(
-                """INSERT INTO files (filename, original_path, source_root, file_size, file_modified_date,
-                   taken_at, date_source, group_key, photos_uuid, status)
-                   VALUES (?, ?, ?, ?, ?, ?, 'photos', ?, ?, 'pending')""",
+                f"""INSERT INTO files (filename, original_path, source_root, file_size, file_modified_date,
+                   taken_at, date_source, group_key, photos_uuid, status,
+                   camera_make, camera_model, lens_model, camera, camera_read_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'photos', ?, ?, 'pending', ?, ?, ?, ?, {'NULL' if kind == 'xmp' else NOW_SQL})""",
                 (filename, path, source, st.st_size, datetime.datetime.fromtimestamp(st.st_mtime).isoformat(),
-                 taken, group, p.uuid))
+                 taken, group, p.uuid, make, model, lens, name))
             ids.append(cur.lastrowid)
     conn.commit()
     return ids, review

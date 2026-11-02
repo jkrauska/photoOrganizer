@@ -14,7 +14,8 @@ from photo_organizer.constants import FILENAME_PATTERNS, VIDEO_EXTENSIONS
 LOCAL_OR_ZONED_TAGS = ('SubSecDateTimeOriginal', 'DateTimeOriginal', 'CreationDate', 'CreationDateValue')
 # QuickTime container dates: UTC per spec, but many cameras write local time instead.
 CONTAINER_TAGS = ('CreateDate', 'MediaCreateDate')
-READ_TAGS = LOCAL_OR_ZONED_TAGS + CONTAINER_TAGS + ('Make', 'MajorBrand')
+CAMERA_TAGS = ('Make', 'Model', 'LensModel')     # recorded in the catalog (cameras.py), free in the same read
+READ_TAGS = LOCAL_OR_ZONED_TAGS + CONTAINER_TAGS + CAMERA_TAGS + ('MajorBrand',)
 # Verified on this library: Sony SLT-A65V MP4 times match its JPEG times; iPhone/phone MOV/MP4 are UTC.
 LOCAL_TIME_VIDEO_MAKERS = ('sony', 'canon', 'nikon', 'panasonic', 'fujifilm', 'olympus', 'om digital',
                            'pentax', 'ricoh', 'leica')
@@ -93,17 +94,21 @@ def _read_chunk(chunk):
         records = json.loads(result.stdout) if result.stdout.strip() else []
     except json.JSONDecodeError:
         records = []
-    out = {}
+    out, cameras = {}, {}
     for rec in records:
         is_video = os.path.splitext(rec['SourceFile'])[1].lower() in VIDEO_EXTENSIONS
         hit = pick_capture_date(rec, is_video)
         if hit:
             out[rec['SourceFile']] = hit
-    return out
+        tags = tuple(str(rec[t]).strip() if rec.get(t) not in (None, '') else None for t in CAMERA_TAGS)
+        if any(tags):
+            cameras[rec['SourceFile']] = tags
+    return out, cameras
 
 
-def read_exif_dates(paths, on_chunk=None, workers=DEFAULT_EXIF_WORKERS):
+def read_exif_dates(paths, on_chunk=None, workers=DEFAULT_EXIF_WORKERS, cameras=None):
     """Return {path: (datetime, raw_string)} for files with a usable embedded capture date.
+    If given, cameras is filled with {path: (make, model, lens)} for files naming any of them.
 
     Over SMB each file costs a network round trip or two, so several exiftool processes
     read disjoint chunks in parallel to keep requests in flight.
@@ -114,7 +119,10 @@ def read_exif_dates(paths, on_chunk=None, workers=DEFAULT_EXIF_WORKERS):
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(_read_chunk, c): len(c) for c in chunks}
         for fut in as_completed(futures):
-            out.update(fut.result())
+            dates, found = fut.result()
+            out.update(dates)
+            if cameras is not None:
+                cameras.update(found)
             done += futures[fut]
             if on_chunk:
                 on_chunk(done, len(paths))

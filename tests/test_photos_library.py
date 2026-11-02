@@ -31,11 +31,12 @@ def asset(lib, uuid, name, when, live=False, edited=False, local=True, raw=False
     make_jpeg(str(orig), "2001:01:01 00:00:00", (sum(map(ord, uuid)) % 255, 1, 2))   # EXIF loses to Photos' date
     p = SimpleNamespace(uuid=uuid, original_filename=name, date=when, path=str(orig) if local else None,
                         has_raw=raw, path_raw=None, live_photo=live, path_live_photo=None,
-                        hasadjustments=edited, path_edited=None)
+                        hasadjustments=edited, path_edited=None,
+                        exif_info=SimpleNamespace(camera_make='SONY', camera_model='ILCE-1', lens_model='FE 50mm F1.2 GM'))
     if not local:
         orig.unlink()
     if live:
-        p.path_live_photo = str(lib / 'originals' / f"{uuid}_3.mov")
+        p.path_live_photo = lib / 'originals' / f"{uuid}_3.mov"      # a Path, as osxphotos returns for some
         open(p.path_live_photo, 'wb').write(b'mov' + uuid.encode())
     if edited:
         p.path_edited = str(lib / 'renders' / f"{uuid}_1_201_a.heic")
@@ -81,6 +82,8 @@ def test_year_is_copied_with_live_edit_raw_and_sidecar_and_library_untouched(env
     ]
     assert totals['keep_sources'] and totals['done'] == 7
     assert {r['photos_uuid'] for r in rows().values()} == {'AAAA', 'BBBB'}
+    cams = {r['filename']: r['camera'] for r in rows().values()}
+    assert cams['IMG_0001.MOV'] == 'Sony A1' and cams['IMG_0001.JPG.xmp'] is None
     assert go(sources=['photos:2016'])['done'] == 0       # a rerun finds nothing new
 
 

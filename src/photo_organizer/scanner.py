@@ -11,7 +11,8 @@ from photo_organizer.constants import (
 from photo_organizer.dates import (
     DEFAULT_EXIF_WORKERS, date_from_dirpath, date_from_filename, read_exif_dates,
 )
-from photo_organizer.db import BACKUP_NAME
+from photo_organizer.cameras import camera_name
+from photo_organizer.db import BACKUP_NAME, NOW_SQL
 from photo_organizer.progress import set_progress
 from photo_organizer.state import shutdown_requested
 
@@ -183,10 +184,11 @@ def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False, exif_w
 
     set_progress(conn, phase='reading dates', scanned_in_batch=len(batch) + ignored,
                  dates_read=0, dates_total=0)
+    cameras = {}
     exif = read_exif_dates(
         [b[3] for b in batch if b[4] in MEDIA_EXTENSIONS],
         on_chunk=lambda done, total: set_progress(conn, dates_read=done, dates_total=total),
-        workers=exif_workers,
+        workers=exif_workers, cameras=cameras,
     )
 
     ids = []
@@ -201,6 +203,12 @@ def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False, exif_w
              compute_group_key(dirpath, fname)),
         )
         ids.append(cur.lastrowid)
+        if ext in MEDIA_EXTENSIONS:     # read just now; a file naming no camera isn't read again
+            make, model, lens = cameras.get(filepath, (None, None, None))
+            conn.execute(
+                f"UPDATE files SET camera_make = ?, camera_model = ?, lens_model = ?, camera = ?, "
+                f"camera_read_at = {NOW_SQL} WHERE id = ?",
+                (make, model, lens, camera_name(make, model) if make or model else None, cur.lastrowid))
     conn.commit()
 
     parts = [f"{len(ids):,} new"]
