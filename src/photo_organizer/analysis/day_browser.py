@@ -279,7 +279,7 @@ const params = () => new URLSearchParams({q: $('#q').value, year: $('#year').val
 async function load(reset) {
   if (reset) { offset = 0; $('#list').innerHTML = ''; }
   const p = params(); p.set('offset', offset);
-  const r = await (await fetch('/api/days?' + p)).json();
+  const r = await (await fetch('api/days?' + p)).json();
   total = r.total; offset += r.items.length;
   $('#count').textContent = `${total.toLocaleString()} day${total == 1 ? '' : 's'}`;
   $('#more')?.remove();
@@ -292,7 +292,7 @@ function card(d) {
   const chips = d.people.map(n => `<button class="chip person" data-q="${esc(n)}">${esc(n)}</button>`)
     .concat(d.keywords.map(k => `<button class="chip" data-q="${esc(k)}">${esc(k)}</button>`)).join('');
   const bursts = d.bursts.map(b => `<div class="burst"><div class="meta">${esc(b.start)}–${esc(b.end)} · ${b.n} photo${b.n == 1 ? '' : 's'}</div>
-    <div class="thumbs">${b.samples.map(s => `<img loading="lazy" src="/thumb/${s.sha}.jpg" title="${esc(s.caption)}"
+    <div class="thumbs">${b.samples.map(s => `<img loading="lazy" src="thumb/${s.sha}.jpg" title="${esc(s.caption)}"
       data-sha="${s.sha}" data-day="${esc(d.day)}" data-cap="${esc(s.caption)}">`).join('')}</div></div>`).join('');
   return `<article class="day"><div class="top"><span class="date">${esc(d.date)}</span>
     <span class="title">${esc(d.title || '(untitled)')}</span>
@@ -310,7 +310,7 @@ function card(d) {
 let local = true;
 async function openIn(day, sha) {
   if (!local) { try { await navigator.clipboard.writeText(day); } catch (e) { prompt('Folder path:', day); } return; }
-  const r = await fetch('/api/open', {method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await fetch('api/open', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                       body: JSON.stringify({day, sha})});
   if (!r.ok) alert((await r.json()).detail || 'Could not open it');
 }
@@ -319,7 +319,7 @@ async function markWrong(btn) {
   const note = prompt('What is wrong? (optional, e.g. "St. Louis, not San Francisco")\\n' +
                       'The day will be re-analyzed with more photos.');
   if (note === null) return;
-  const r = await fetch('/api/wrong', {method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await fetch('api/wrong', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                        body: JSON.stringify({day: btn.dataset.wrong, note})});
   if (!r.ok) { alert('Could not mark it'); return; }
   btn.insertAdjacentHTML('afterend', `<span class="badge">Queued for re-analysis${note ? ': ' + esc(note) : ''}</span>`);
@@ -330,7 +330,7 @@ async function markWrong(btn) {
 async function saveContext(ta) {
   const context = ta.value.trim();
   if (context === ta.dataset.prev) return;
-  const r = await fetch('/api/context', {method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await fetch('api/context', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                          body: JSON.stringify({day: ta.dataset.day, context})});
   if (!r.ok) { alert('Could not save the context'); return; }
   ta.dataset.prev = context;
@@ -356,7 +356,7 @@ document.addEventListener('click', e => {
 function show(img) {
   viewing = img;
   const d = img.closest('.day');
-  $('#vimg').src = `/photo/${img.dataset.sha}.jpg`;
+  $('#vimg').src = `photo/${img.dataset.sha}.jpg`;
   $('#vcap').textContent = `${d.querySelector('.date').textContent} · ${d.querySelector('.title').textContent}` +
     (img.dataset.cap ? ` — ${img.dataset.cap}` : '');
   $('#viewer').style.display = 'flex';
@@ -378,9 +378,9 @@ $('#year').addEventListener('change', () => load(true));
 $('#order').addEventListener('change', () => load(true));
 
 (async () => {
-  local = (await (await fetch('/api/local')).json()).local;
+  local = (await (await fetch('api/local')).json()).local;
   if (!local) { document.body.classList.add('remote'); $('#vreveal').textContent = 'Copy folder path'; }
-  for (const y of await (await fetch('/api/years')).json())
+  for (const y of await (await fetch('api/years')).json())
     $('#year').insertAdjacentHTML('beforeend', `<option>${esc(y)}</option>`);
   try { const s = JSON.parse(localStorage.getItem('days-ui') || '{}');
         for (const k of ['q', 'year', 'order']) if (s[k] != null) $('#' + k).value = s[k]; } catch (e) {}

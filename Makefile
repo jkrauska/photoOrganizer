@@ -39,7 +39,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
 .PHONY: help sync inventory run queue queue-photos set-date queue-list cameras cameras-stats worker worker-bg stop verify status enrich faces browse test \
-	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui
+	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui ui
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
@@ -54,6 +54,7 @@ help:
 	@echo "make stop       stop a running inventory/run/worker gracefully (in-flight files finish)"
 	@echo "make verify     re-read every stored file from the NAS and check its hash"
 	@echo "make status     live status page at http://localhost:$(PORT)/"
+	@echo "make ui         every page on one server: status, archive, days, faces, shuffle (http://$(shell hostname):$(PORT))"
 	@echo "make enrich     Gemma 4 + InsightFace analysis, clustering, metadata, index (Apple Photos)"
 	@echo "make faces      face-cluster labeling app"
 	@echo "make browse     Datasette over the analysis index"
@@ -163,6 +164,10 @@ ark-faces-ui:
 ark-days-ui:
 	uv sync --quiet --extra analysis
 	uv run photo-day-browser --host $(UI_HOST) --port $(DAYS_PORT)
+
+ui:
+	uv sync --quiet --inexact --extra analysis
+	uv run photo-ui --host $(UI_HOST) --port $(PORT)
 
 ark-shuffle-ui:
 	uv sync --quiet --extra analysis

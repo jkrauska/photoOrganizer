@@ -273,7 +273,7 @@ let autoAt = 0, outgoing = null;   // when the timer last changed photo, and the
 
 async function fetchRandom() {
   for (let i = 0; i < 5; i++) {
-    const r = await fetch('/api/random');
+    const r = await fetch('api/random');
     if (!r.ok) { await new Promise(ok => setTimeout(ok, 1500)); continue; }
     const p = await r.json();
     if (await preload(p)) return p;
@@ -285,7 +285,7 @@ function preload(p) {
     const im = new Image();
     im.onload = () => { p.w = im.naturalWidth; p.h = im.naturalHeight; ok(true); };
     im.onerror = () => ok(false);
-    im.src = `/photo/${p.sha}.jpg`;
+    im.src = `photo/${p.sha}.jpg`;
   });
 }
 let filling = false;
@@ -318,7 +318,7 @@ function show(p) {
   const back = $('#s' + (1 - front)), cur = $('#s' + front);
   const img = back.querySelector('img');
   img.getAnimations().forEach(a => a.cancel());
-  img.src = `/photo/${p.sha}.jpg`;
+  img.src = `photo/${p.sha}.jpg`;
   back.querySelector('.bg').style.backgroundImage = `url(/photo/${p.sha}.jpg)`;
   anim = kenBurns(img);
   if (!playing) anim.pause();
@@ -397,7 +397,7 @@ async function score(n) {
   // A key pressed while the timer is still fading a photo out is meant for that photo.
   const p = autoAt && Date.now() - autoAt < FADE * .7 && outgoing ? outgoing : history[at];
   if (!p) return;
-  const r = await fetch('/api/score', {method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await fetch('api/score', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                        body: JSON.stringify({sha: p.sha, score: n || null})});
   if (!r.ok) { status('Could not save the score'); return; }
   p.score = n || null;

@@ -444,14 +444,115 @@ def list_subdirs(path):
     return {'path': path, 'dirs': [os.path.join(path, n) for n in names[:200]]}
 
 
+def local_hosts(port):
+    return {f'localhost:{port}', f'127.0.0.1:{port}', f'[::1]:{port}'}
+
+
+def respond(db_path, hosts, method, raw_path, headers, body=b''):
+    """(code, body, content type) for one request to the status pages; body is text, bytes or JSON-able.
+    hosts: the Host values this server answers to on localhost (see trusted)."""
+    url = urlparse(raw_path)
+    query = parse_qs(url.query)
+    html = 'text/html; charset=utf-8'
+    forbidden = (403, {'ok': False, 'message': 'queue changes are only accepted from this Mac'}, None)
+
+    def trusted(write=False):
+        """Queue changes delete files, so only this page may make them: the Host must be this
+        server on localhost (blocks DNS rebinding), any Origin must match it, and writes must be
+        JSON (a cross-site page can't send that without a CORS preflight, which is never granted)."""
+        host = headers.get('Host', '')
+        origin = headers.get('Origin')
+        if host not in hosts or (origin and origin != f'http://{host}'):
+            return False
+        if write and not headers.get('Content-Type', '').startswith('application/json'):
+            return False
+        return True
+
+    if method == 'GET':
+        if url.path == '/':
+            return 200, PAGE, html
+        if url.path == '/archive':
+            return 200, ARCHIVE_PAGE, html
+        if url.path == '/api/dirs':
+            if not trusted():
+                return forbidden
+            return 200, list_subdirs(query.get('path', [''])[0]), None
+        try:
+            if url.path == '/api/status':
+                return 200, snapshot(db_path), None
+            if url.path == '/api/archive':
+                return 200, archive_snapshot(db_path), None
+            if url.path == '/api/archive/month':
+                return 200, month_detail(db_path, query.get('ym', [''])[0]), None
+        except sqlite3.Error as e:
+            return 503, {'ok': False, 'message': f"catalog unavailable: {e}"}, None
+        return 404, {'ok': False, 'message': 'not found'}, None
+
+    if method == 'POST':
+        if url.path != '/api/queue':
+            return 404, {'ok': False, 'message': 'not found'}, None
+        if not trusted(write=True):
+            return forbidden
+        try:
+            payload = json.loads(body or b'{}')
+            path, keep = payload.get('path', ''), bool(payload.get('keep_sources'))
+            split = bool(payload.get('split'))
+            photos = bool(payload.get('photos'))
+        except (ValueError, AttributeError):
+            return 400, {'ok': False, 'message': 'bad request'}, None
+        if photos:
+            conn = init_db(db_path)
+            try:
+                queued, message = enqueue_photos(conn)
+            except Exception as e:      # library unreadable (permissions, osxphotos version)
+                queued, message = [], f"can't read the Apple Photos library: {e}"
+            finally:
+                conn.close()
+            return 200 if queued else 400, {'ok': bool(queued), 'message': message}, None
+        if not isinstance(path, str) or not path.strip():
+            return 400, {'ok': False, 'message': 'enter a folder path'}, None
+        conn = init_db(db_path)
+        try:
+            if split:
+                queued, message = enqueue_split(conn, path, _queue_dest(db_path), keep)
+            else:
+                queued, message = enqueue(conn, path, _queue_dest(db_path), keep)
+        finally:
+            conn.close()
+        return 200 if queued else 400, {'ok': bool(queued), 'message': message}, None
+
+    if method == 'DELETE':
+        parts = url.path.rstrip('/').split('/')
+        if parts[:3] != ['', 'api', 'queue'] or len(parts) != 4 or not parts[3].isdigit():
+            return 404, {'ok': False, 'message': 'not found'}, None
+        if not trusted():
+            return forbidden
+        conn = init_db(db_path)
+        try:
+            n = conn.execute("DELETE FROM queue WHERE id = ? AND status = 'queued'", (int(parts[3]),)).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return 200 if n else 400, {'ok': bool(n), 'message': 'removed' if n else 'only queued items can be removed'}, None
+    return 405, {'ok': False, 'message': 'method not allowed'}, None
+
+
+def encode(body, ctype):
+    """(bytes, content type) for a respond() body."""
+    if isinstance(body, (dict, list)):
+        body = json.dumps(body)
+    return (body.encode() if isinstance(body, str) else body), ctype or 'application/json'
+
+
 def make_handler(db_path, port):
-    local_hosts = {f'localhost:{port}', f'127.0.0.1:{port}', f'[::1]:{port}'}
+    hosts = local_hosts(port)
 
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, code, body, ctype='application/json'):
-            if isinstance(body, (dict, list)):
-                body = json.dumps(body)
-            body = body.encode() if isinstance(body, str) else body
+        def _handle(self, method):
+            length = min(int(self.headers.get('Content-Length', 0) or 0), 65536)
+            code, body, ctype = respond(db_path, hosts, method, self.path, self.headers,
+                                        self.rfile.read(length) if length else b'')
+            body, ctype = encode(body, ctype)
             self.send_response(code)
             self.send_header('Content-Type', ctype)
             self.send_header('Cache-Control', 'no-store')
@@ -459,87 +560,14 @@ def make_handler(db_path, port):
             self.end_headers()
             self.wfile.write(body)
 
-        def _trusted(self, write=False):
-            """Queue changes delete files, so only this page may make them: the Host must be this
-            server on localhost (blocks DNS rebinding), any Origin must match it, and writes must be
-            JSON (a cross-site page can't send that without a CORS preflight, which is never granted)."""
-            host = self.headers.get('Host', '')
-            origin = self.headers.get('Origin')
-            if host not in local_hosts or (origin and origin != f'http://{host}'):
-                return False
-            if write and not self.headers.get('Content-Type', '').startswith('application/json'):
-                return False
-            return True
-
         def do_GET(self):
-            url = urlparse(self.path)
-            query = parse_qs(url.query)
-            if url.path == '/':
-                return self._send(200, PAGE, 'text/html; charset=utf-8')
-            if url.path == '/archive':
-                return self._send(200, ARCHIVE_PAGE, 'text/html; charset=utf-8')
-            if url.path == '/api/dirs':
-                if not self._trusted():
-                    return self.send_error(403)
-                return self._send(200, list_subdirs(query.get('path', [''])[0]))
-            try:
-                if url.path == '/api/status':
-                    return self._send(200, snapshot(db_path))
-                if url.path == '/api/archive':
-                    return self._send(200, archive_snapshot(db_path))
-                if url.path == '/api/archive/month':
-                    return self._send(200, month_detail(db_path, query.get('ym', [''])[0]))
-            except sqlite3.Error as e:
-                return self.send_error(503, f"catalog unavailable: {e}")
-            self.send_error(404)
+            self._handle('GET')
 
         def do_POST(self):
-            if urlparse(self.path).path != '/api/queue':
-                return self.send_error(404)
-            if not self._trusted(write=True):
-                return self.send_error(403)
-            try:
-                length = min(int(self.headers.get('Content-Length', 0)), 65536)
-                payload = json.loads(self.rfile.read(length) or b'{}')
-                path, keep = payload.get('path', ''), bool(payload.get('keep_sources'))
-                split = bool(payload.get('split'))
-                photos = bool(payload.get('photos'))
-            except (ValueError, AttributeError):
-                return self._send(400, {'ok': False, 'message': 'bad request'})
-            if photos:
-                conn = init_db(db_path)
-                try:
-                    queued, message = enqueue_photos(conn)
-                except Exception as e:      # library unreadable (permissions, osxphotos version)
-                    queued, message = [], f"can't read the Apple Photos library: {e}"
-                finally:
-                    conn.close()
-                return self._send(200 if queued else 400, {'ok': bool(queued), 'message': message})
-            if not isinstance(path, str) or not path.strip():
-                return self._send(400, {'ok': False, 'message': 'enter a folder path'})
-            conn = init_db(db_path)
-            try:
-                if split:
-                    queued, message = enqueue_split(conn, path, _queue_dest(db_path), keep)
-                else:
-                    queued, message = enqueue(conn, path, _queue_dest(db_path), keep)
-            finally:
-                conn.close()
-            return self._send(200 if queued else 400, {'ok': bool(queued), 'message': message})
+            self._handle('POST')
 
         def do_DELETE(self):
-            parts = urlparse(self.path).path.rstrip('/').split('/')
-            if parts[:3] != ['', 'api', 'queue'] or len(parts) != 4 or not parts[3].isdigit():
-                return self.send_error(404)
-            if not self._trusted():
-                return self.send_error(403)
-            conn = init_db(db_path)
-            try:
-                n = conn.execute("DELETE FROM queue WHERE id = ? AND status = 'queued'", (int(parts[3]),)).rowcount
-                conn.commit()
-            finally:
-                conn.close()
-            return self._send(200 if n else 400, {'ok': bool(n), 'message': 'removed' if n else 'only queued items can be removed'})
+            self._handle('DELETE')
 
         def log_message(self, *args):
             pass

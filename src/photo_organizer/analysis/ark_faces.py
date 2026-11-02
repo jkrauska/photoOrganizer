@@ -72,7 +72,7 @@ def list_clusters(conn):
         cid = UNCLUSTERED if r['cluster_id'] is None else f"c{r['cluster_id']}"
         entry = {'id': cid, 'count': r['n'], 'named': r['named'] or 0, 'suggested': r['suggested'] or 0,
                  'label': '' if cid == UNCLUSTERED else _cluster_name(conn, cid)[1],
-                 'sample': f"/face/{r['sample']}.jpg"}
+                 'sample': f"face/{r['sample']}.jpg"}
         if cid == UNCLUSTERED:
             tail = entry
         else:
@@ -198,7 +198,7 @@ def cluster_detail(conn, cid, limit=500, catalog_path=None):
             todo.sort(key=lambda r: (-band(r), _when(r['path'], taken.get(r['sha256'])), r['path'], r['id']))
     return [{'id': r['id'], 'filename': os.path.basename(r['path']), 'path': r['path'],
              'det_score': r['det_score'], 'name': r['name'] or '', 'source': r['person_source'] or '',
-             'score': r['person_score'], 'face_url': f"/face/{r['id']}.jpg",
+             'score': r['person_score'], 'face_url': f"face/{r['id']}.jpg",
              'taken': taken.get(r['sha256']) or '', 'burst': bursts.get(r['id'], []),
              **({'sim': round(sim[r['id']], 3), 'sim_to': sim_to} if r['id'] in sim else {})}
             for r in (todo + named)[:limit]]

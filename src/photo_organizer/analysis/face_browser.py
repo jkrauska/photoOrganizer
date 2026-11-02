@@ -617,12 +617,12 @@ function escapeHtml(s) {
 }
 
 async function loadClusters() {
-  [clusters] = await Promise.all([fetch('/api/clusters').then(r => r.json()), loadPersons()]);
+  [clusters] = await Promise.all([fetch('api/clusters').then(r => r.json()), loadPersons()]);
   renderSidebar();
 }
 
 async function loadPersons() {
-  const names = await fetch('/api/persons').then(r => r.json());
+  const names = await fetch('api/persons').then(r => r.json());
   document.getElementById('persons').innerHTML = names.map(n => `<option value="${escapeHtml(n)}">`).join('');
 }
 
@@ -672,7 +672,7 @@ async function selectCluster(id) {
 }
 
 async function loadFaces() {
-  faces = await fetch(`/api/cluster/${currentId}`).then(r => r.json());
+  faces = await fetch(`api/cluster/${currentId}`).then(r => r.json());
   const sugg = faces.filter(f => f.source === 'suggested');
   document.getElementById('suggRow').innerHTML = sugg.length
     ? `<button onclick="judge(${JSON.stringify(sugg.flatMap(idsOf))}, true)">Accept ${sugg.length} suggested name${sugg.length===1?'':'s'}</button>
@@ -741,7 +741,7 @@ async function confirmBand(band) {
   const ids = todo.filter(f => bandOf(f) === band).flatMap(idsOf);
   if (!name || !ids.length) return;
   const y = window.scrollY;
-  await post('/api/label_faces', {face_ids: ids, label: name});
+  await post('api/label_faces', {face_ids: ids, label: name});
   await refresh();
   window.scrollTo(0, y);
 }
@@ -773,7 +773,7 @@ function figureHtml(f) {
 let viewerId = null;
 let viewerBox = true;
 
-const photoUrl = id => `/photo/${id}.jpg${viewerBox ? '' : '?box=0'}`;
+const photoUrl = id => `photo/${id}.jpg${viewerBox ? '' : '?box=0'}`;
 
 function openViewer(id, fromDblClick = true) {
   const f = faces.find(x => x.id === id);
@@ -818,7 +818,7 @@ let guess = null;
 
 async function loadGuess() {
   const id = currentId;
-  const g = await fetch(`/api/cluster/${id}/guess`).then(r => r.json());
+  const g = await fetch(`api/cluster/${id}/guess`).then(r => r.json());
   if (id !== currentId) return;
   guess = g;
   const row = document.getElementById('guessRow');
@@ -834,7 +834,7 @@ async function guessYes() {
 }
 
 async function guessNo() {
-  await post('/api/guess_no', {cluster_id: currentId, name: guess.name});
+  await post('api/guess_no', {cluster_id: currentId, name: guess.name});
   await loadGuess();
   document.getElementById('labelInput')?.focus();
 }
@@ -868,7 +868,7 @@ async function nameSelected() {
   const ids = selectedIds();
   if (!label || !ids.length) { document.getElementById('selName').focus(); return; }
   const y = window.scrollY;
-  await post('/api/label_faces', {face_ids: ids, label});
+  await post('api/label_faces', {face_ids: ids, label});
   await refresh();
   window.scrollTo(0, y);
 }
@@ -885,7 +885,7 @@ function clearSelection() {
 
 async function forget(ids) {
   if (!ids.length) return;
-  await post('/api/forget', {face_ids: ids});
+  await post('api/forget', {face_ids: ids});
   // Drop them in place so a long list keeps its scroll position.
   ids.forEach(id => document.querySelector(`#grid figure[data-id="${id}"]`)?.remove());
   faces = faces.filter(f => !ids.includes(f.id));
@@ -895,7 +895,7 @@ async function forget(ids) {
 
 async function forgetCluster(n) {
   if (!confirm(`Delete ${n} unnamed face${n===1?'':'s'} in ${currentId}? Named and suggested faces stay.`)) return;
-  await post('/api/forget', {cluster_id: currentId});
+  await post('api/forget', {cluster_id: currentId});
   await refresh();
 }
 
@@ -905,7 +905,7 @@ async function refresh() {
 }
 
 async function judge(ids, accept) {
-  await post('/api/suggestions', {face_ids: ids, accept});
+  await post('api/suggestions', {face_ids: ids, accept});
   await refresh();
 }
 
@@ -913,7 +913,7 @@ async function saveFaceLabel(inp) {
   const label = inp.value.trim();
   if (label === (inp.dataset.prev || '')) return;
   const f = faces.find(x => x.id === parseInt(inp.dataset.id, 10));
-  await post('/api/label_faces', {face_ids: f ? idsOf(f) : [parseInt(inp.dataset.id, 10)], label});
+  await post('api/label_faces', {face_ids: f ? idsOf(f) : [parseInt(inp.dataset.id, 10)], label});
   inp.dataset.prev = label;
   inp.classList.toggle('saved', !!label);
   await loadClusters();
@@ -922,7 +922,7 @@ async function saveFaceLabel(inp) {
 async function saveLabel(advance) {
   const label = document.getElementById('labelInput').value.trim();
   // Only the faces on screen: a big cluster shows its first 500, and the rest are unchecked.
-  await post('/api/label', {cluster_id: currentId, label, face_ids: shownIds()});
+  await post('api/label', {cluster_id: currentId, label, face_ids: shownIds()});
   await loadClusters();
   const total = clusters.find(c => c.id === currentId)?.count || 0;
   if (advance && total <= shownIds().length) {

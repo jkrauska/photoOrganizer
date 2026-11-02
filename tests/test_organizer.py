@@ -701,7 +701,7 @@ def test_ark_faces_lists_clusters_and_names_clusters_and_faces(tmp_path):
     db, conn = _ark_face_db(tmp_path)
     got = ark_faces.list_clusters(conn)
     assert [(c['id'], c['count'], c['label']) for c in got] == [('c0', 3, ''), ('unclustered', 1, '')]
-    assert got[0]['sample'] == '/face/1.jpg', "sample is the best detection"
+    assert got[0]['sample'] == 'face/1.jpg', "sample is the best detection"
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'unclustered')] == [4]
     with pytest.raises(KeyError):
         ark_faces.cluster_detail(conn, 'x1')
