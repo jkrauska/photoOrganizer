@@ -18,6 +18,7 @@ EXIF_WORKERS ?= 8
 YES     ?=
 PORT    ?= 8077
 FACES_PORT ?= 8078
+DAYS_PORT ?= 8079
 
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
@@ -35,7 +36,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
 .PHONY: help sync inventory run queue set-date queue-list worker worker-bg stop verify status enrich faces browse test \
-	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui
+	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
@@ -56,6 +57,7 @@ help:
 	@echo "make ark-days   Gemma summaries of random day folders (whole store, or DAYS_YEAR=2010), in background"
 	@echo "make ark-seed   suggest names from the Apple Photos labels; ark-stats shows counts"
 	@echo "make ark-faces-ui  name face clusters in the photoArk analysis DB (127.0.0.1:$(FACES_PORT))"
+	@echo "make ark-days-ui  browse and search the day summaries (127.0.0.1:$(DAYS_PORT))"
 	@echo "make test       run the test suite"
 	@echo
 	@echo "SOURCES=$(SOURCES)"
@@ -142,6 +144,10 @@ ark-stats:
 ark-faces-ui:
 	uv sync --quiet --extra analysis
 	uv run photo-face-browser --ark --port $(FACES_PORT)
+
+ark-days-ui:
+	uv sync --quiet --extra analysis
+	uv run photo-day-browser --port $(DAYS_PORT)
 
 test:
 	uv run pytest -q

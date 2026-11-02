@@ -922,3 +922,43 @@ def test_ark_spread_order_takes_a_few_images_from_every_year_per_round(tmp_path)
     assert years[24:36].count('2003') == 10 and years[24:36].count('2021') == 2
     assert years[36:] == ['2003'] * 5
     assert out != spread_order(images, per_year=10, seed=2), "random within a year"
+
+
+def test_ark_day_browser_searches_summaries_and_captions_and_opens_only_known_days(tmp_path):
+    pytest.importorskip('fastapi')
+    pytest.importorskip('httpx')
+    from fastapi.testclient import TestClient
+    from photo_organizer.analysis import ark, days
+    from photo_organizer.analysis.day_browser import make_app
+    day = tmp_path / '2010' / '06' / '2010-06-05'
+    day.mkdir(parents=True)
+    Image.new('RGB', (40, 20), (0, 90, 200)).save(day / 'a.jpg')
+    db = str(tmp_path / 'analysis.db')
+    conn = ark.open_db(db)
+    days.init(conn)
+    conn.execute("INSERT INTO images (sha256, path, caption) VALUES ('h1', ?, 'an orange tabby cat on a rug')",
+                 (str(day / 'a.jpg'),))
+    for d, date, title, kw in [(str(day), '2010-06-05', 'Beach day', ['beach', 'surf']),
+                               ('/x/2011/01/2011-01-02', '2011-01-02', 'Ski trip', ['snow'])]:
+        conn.execute("INSERT INTO days (day, date, n_images, n_bursts, bursts, title, summary, keywords, people, "
+                     "summarized_at) VALUES (?, ?, 1, 1, ?, ?, 'x', ?, '[]', 'now')",
+                     (d, date, json.dumps([{'start': '10:00', 'end': '10:00', 'n': 1,
+                                            'samples': ['h1'] if d == str(day) else []}]), title, json.dumps(kw)))
+    conn.commit()
+    opened = []
+    client = TestClient(make_app(db, tmp_path / 'thumbs', opener=opened.append))
+    assert client.get('/api/days').json()['total'] == 2
+    assert [d['title'] for d in client.get('/api/days', params={'q': 'surf'}).json()['items']] == ['Beach day']
+    assert [d['title'] for d in client.get('/api/days', params={'q': 'tabby cat'}).json()['items']] == ['Beach day']
+    assert client.get('/api/days', params={'q': 'tabby snow'}).json()['total'] == 0
+    assert [d['title'] for d in client.get('/api/days', params={'year': '2011'}).json()['items']] == ['Ski trip']
+    assert client.get('/api/years').json() == ['2010', '2011']
+    assert client.get('/thumb/h1.jpg').headers['content-type'] == 'image/jpeg'
+    assert (tmp_path / 'thumbs' / 'h1.jpg').exists()
+    assert client.get('/thumb/nope.jpg').status_code == 404
+    assert client.post('/api/open', json={'day': str(day)}).status_code == 200
+    assert client.post('/api/open', json={'day': str(day), 'sha': 'h1'}).status_code == 200
+    assert opened == [[str(day)], ['-R', str(day / 'a.jpg')]]
+    assert client.post('/api/open', json={'day': '/etc'}).status_code == 404
+    assert client.post('/api/open', json={'day': '/x/2011/01/2011-01-02'}).status_code == 404   # not mounted
+    assert client.get('/').status_code == 200

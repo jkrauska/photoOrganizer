@@ -43,6 +43,7 @@ photo-enrich = "photo_organizer.analysis.enrich:main"
 photo-index = "photo_organizer.analysis.index:main"
 photo-face-browser = "photo_organizer.analysis.face_browser:main"
 photo-ark-analyze = "photo_organizer.analysis.ark:main"
+photo-day-browser = "photo_organizer.analysis.day_browser:main"
 
 [build-system]
 requires = ["hatchling"]
