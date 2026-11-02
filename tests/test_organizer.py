@@ -707,7 +707,9 @@ def test_ark_faces_lists_clusters_and_names_clusters_and_faces(tmp_path):
         ark_faces.cluster_detail(conn, 'x1')
 
     ark_faces.name_faces(conn, [2], 'Bob')                       # an individual override
-    assert ark_faces.name_cluster(conn, 'c0', 'Alice') == 2
+    assert ark_faces.name_cluster(conn, 'c0', 'Alice', only=[1, 2, 4]) == 1, "only the faces shown"
+    assert _ark_names(conn)[3] == (None, None)
+    assert ark_faces.name_cluster(conn, 'c0', 'Alice') == 1, "the rest on the next save"
     assert _ark_names(conn) == {1: ('Alice', 'manual'), 2: ('Bob', 'manual'),
                                 3: ('Alice', 'manual'), 4: (None, None)}
     assert ark_faces.list_clusters(conn)[0]['label'] == 'Alice'

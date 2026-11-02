@@ -355,6 +355,7 @@ def index():
 class ArkLabelIn(BaseModel):
     cluster_id: str
     label: str
+    face_ids: list[int] | None = None  # only these (the faces the page showed)
 
 
 class ArkFaceLabelIn(BaseModel):
@@ -451,7 +452,8 @@ def make_ark_app(db_path, crop_dir) -> FastAPI:
     def label_cluster(body: ArkLabelIn):
         with db() as conn:
             try:
-                n = cluster_or_404(ark_faces.name_cluster, conn, body.cluster_id, body.label)
+                n = cluster_or_404(ark_faces.name_cluster, conn, body.cluster_id, body.label,
+                                   body.face_ids)
             except ValueError as e:
                 raise HTTPException(400, str(e))
         return {"ok": True, "changed": n}
@@ -840,9 +842,11 @@ async function saveFaceLabel(inp) {
 
 async function saveLabel(advance) {
   const label = document.getElementById('labelInput').value.trim();
-  await post('/api/label', {cluster_id: currentId, label});
+  // Only the faces on screen: a big cluster shows its first 500, and the rest are unchecked.
+  await post('/api/label', {cluster_id: currentId, label, face_ids: faces.map(f => f.id)});
   await loadClusters();
-  if (advance) {
+  const total = clusters.find(c => c.id === currentId)?.count || 0;
+  if (advance && total <= faces.length) {
     const order = sortedClusters();
     const idx = order.findIndex(x => x.id === currentId);
     const next = order.slice(idx + 1).find(x => !x.label && x.id !== 'unclustered')

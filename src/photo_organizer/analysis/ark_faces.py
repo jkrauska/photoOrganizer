@@ -112,9 +112,10 @@ def name_faces(conn, face_ids, name):
     return cur.rowcount
 
 
-def name_cluster(conn, cid, name):
+def name_cluster(conn, cid, name, only=None):
     """Name every face in a cluster, except faces named by hand as someone else (those overrides
-    stay). Faces carrying the cluster's previous name follow the rename. Returns faces changed."""
+    stay). Faces carrying the cluster's previous name follow the rename. `only` limits it to those
+    face ids (the ones the page showed). Returns faces changed."""
     if cid == UNCLUSTERED:
         raise ValueError("name unclustered faces one by one")
     where, params = _cluster_where(cid)
@@ -122,6 +123,9 @@ def name_cluster(conn, cid, name):
     ids = [r[0] for r in conn.execute(
         f"SELECT f.id FROM faces f WHERE {where} AND (f.person_source IS NOT 'manual' OR f.person_id IS ?)",
         (*params, old_pid))]
+    if only is not None:
+        only = set(only)
+        ids = [i for i in ids if i in only]
     return name_faces(conn, ids, name) if ids else 0
 
 
