@@ -4,6 +4,7 @@ Results live in ~/.photo-organizer/analysis.db, keyed by content hash (sha256 fr
 organizer's catalog), so they follow a file wherever it sits and survive renames.
 
   photo-ark-analyze run --year 2010 [--no-vlm | --no-faces]   analyze stored images (resumable)
+  photo-ark-analyze run --spread 10 --no-vlm                    whole store, 10 random images per year per round
   photo-ark-analyze seed-names                                  suggest names from ~/gemma labels
   photo-ark-analyze cluster                                     group unnamed faces (DBSCAN)
   photo-ark-analyze days [--year 2010]                          summarize random day folders
@@ -18,6 +19,8 @@ import argparse
 import io
 import json
 import os
+import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -90,10 +93,13 @@ def open_db(path=DEFAULT_ANALYSIS_DB):
 
 
 def select_images(catalog_path, year=None, prefix=None, dest=None):
-    """[(sha256, dest_path)] of stored images under the year folder or path prefix, one per hash."""
+    """[(sha256, dest_path)] of stored images under the year folder or path prefix (default: the
+    whole store), one per hash."""
     if year:
         root = dest or _store_root(catalog_path)
         prefix = os.path.join(root, str(year))
+    elif not prefix:
+        prefix = dest or _store_root(catalog_path)
     prefix = prefix.rstrip('/') + '/'
     cat = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True, timeout=30)
     try:
@@ -107,6 +113,28 @@ def select_images(catalog_path, year=None, prefix=None, dest=None):
         if os.path.splitext(path)[1].lower() in PHOTO_EXTENSIONS and sha not in seen:
             seen.add(sha)
             out.append((sha, path))
+    return out
+
+
+_YEAR_DIR = re.compile(r'/((?:18|19|20)\d\d)/')
+
+
+def spread_order(images, per_year=10, seed=None):
+    """Reorder images so a run jumps around the store: each round takes per_year random images
+    from every year folder, then the next round, until all are used. Faces from every era turn
+    up early, so clustering and name matching see the whole span long before the run ends."""
+    by_year = {}
+    for item in images:
+        m = _YEAR_DIR.search(item[1])
+        by_year.setdefault(m.group(1) if m else '', []).append(item)
+    rng = random.Random(seed)
+    for v in by_year.values():
+        rng.shuffle(v)
+    out, start = [], 0
+    while len(out) < len(images):
+        for y in sorted(by_year):
+            out += by_year[y][start:start + per_year]
+        start += per_year
     return out
 
 
@@ -460,10 +488,14 @@ def main():
     sub = parser.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('run', help='analyze stored images')
     p.add_argument('--catalog', default=DEFAULT_DB_PATH)
-    g = p.add_mutually_exclusive_group(required=True)
+    g = p.add_mutually_exclusive_group()
     g.add_argument('--year', type=int)
-    g.add_argument('--prefix', help='store folder to analyze, e.g. /Volumes/photoArk/2010/06')
+    g.add_argument('--prefix', help='store folder to analyze, e.g. /Volumes/photoArk/2010/06 '
+                                    '(default: whole store)')
     p.add_argument('--dest', help='store root (default: from the catalog)')
+    p.add_argument('--spread', type=int, default=0, metavar='N',
+                   help='jump around: N random images from each year per round (default: path order)')
+    p.add_argument('--seed', type=int, help='fix the --spread order')
     p.add_argument('--limit', type=int, default=0)
     p.add_argument('--no-faces', action='store_true')
     p.add_argument('--no-vlm', action='store_true')
@@ -493,6 +525,8 @@ def main():
     conn = open_db(args.db)
     if args.cmd == 'run':
         images = select_images(args.catalog, args.year, args.prefix, args.dest)
+        if args.spread:
+            images = spread_order(images, args.spread, args.seed)
         if args.limit:
             images = images[:args.limit]
         face_fn = None if args.no_faces else FaceModel()

@@ -905,3 +905,20 @@ def test_ark_days_summarize_random_days_once_from_sampled_captions(tmp_path):
     assert sum(len(b['samples']) for b in json.loads(row['bursts'])) == 4
     assert days.run_days(conn, found, vlm, summary, 'gemma', log=lambda s: None) == 0   # done days skipped
     assert len(captioned) == 5
+
+
+def test_ark_spread_order_takes_a_few_images_from_every_year_per_round(tmp_path):
+    from photo_organizer.analysis.ark import select_images, spread_order
+    rows = [(f'/store/{y}/01/{y}-01-01/{i}.jpg', f'{y}-{i}', 'done')
+            for y, n in ((2003, 25), (2010, 3), (2021, 12)) for i in range(n)]
+    db = _ark_catalog(tmp_path, rows + [('/store/misc/x.jpg', 'm', 'done')])
+    images = select_images(db, dest='/store')
+    assert len(images) == 41, "no year or prefix: the whole store"
+    out = spread_order(images, per_year=10, seed=1)
+    assert sorted(out) == sorted(images)
+    years = [p.split('/')[2] for _, p in out]
+    first = years[:24]                       # round 1: up to 10 from each year, plus the yearless file
+    assert (first.count('2003'), first.count('2010'), first.count('2021'), first.count('misc')) == (10, 3, 10, 1)
+    assert years[24:36].count('2003') == 10 and years[24:36].count('2021') == 2
+    assert years[36:] == ['2003'] * 5
+    assert out != spread_order(images, per_year=10, seed=2), "random within a year"
