@@ -47,25 +47,29 @@ class PriorCatalogs:
     """
 
     def __init__(self):
-        self._conns = {}
+        self._catalogs = {}     # source_root -> {dest_path: row} (or None without a catalog)
+
+    def _load(self, source_root):
+        """Read the whole catalog once: it usually sits on the NAS and has no dest_path index,
+        so a query per file rescanned the table over SMB (minutes for a few thousand files)."""
+        for name in (PRIOR_CATALOG_NAME, BACKUP_NAME):
+            path = os.path.join(source_root, name)
+            if os.path.exists(path):
+                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                conn.row_factory = sqlite3.Row
+                try:
+                    return {r['dest_path']: r for r in conn.execute(
+                        "SELECT dest_path, original_path, date_source FROM files "
+                        "WHERE status = 'done' AND dest_path IS NOT NULL")}
+                finally:
+                    conn.close()
+        return None
 
     def lookup(self, source_root, filepath):
-        if source_root not in self._conns:
-            conn = None
-            for name in (PRIOR_CATALOG_NAME, BACKUP_NAME):
-                path = os.path.join(source_root, name)
-                if os.path.exists(path):
-                    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-                    conn.row_factory = sqlite3.Row
-                    break
-            self._conns[source_root] = conn
-        conn = self._conns[source_root]
-        if conn is None:
-            return None
-        return conn.execute(
-            "SELECT original_path, date_source FROM files WHERE dest_path = ? AND status = 'done'",
-            (filepath,),
-        ).fetchone()
+        if source_root not in self._catalogs:
+            self._catalogs[source_root] = self._load(source_root)
+        catalog = self._catalogs[source_root]
+        return catalog.get(filepath) if catalog else None
 
 
 class PushbackIter:
