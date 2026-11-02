@@ -103,6 +103,34 @@ def random_photo(catalog, days, rng=random, skip=frozenset()):
     return r['sha256'], r['dest_path'], r['taken_at']
 
 
+def persons(analysis):
+    """[{id, name, photos}] of named people, most photographed first."""
+    return [dict(r) for r in analysis.execute(
+        "SELECT p.id, p.name, COUNT(DISTINCT f.sha256) photos FROM persons p JOIN faces f ON f.person_id = p.id "
+        "GROUP BY p.id ORDER BY photos DESC, p.name")]
+
+
+def person_days(analysis, person_id, skip=frozenset()):
+    """{day folder: [sha256]} of the photos with the person's face, from where they were analyzed."""
+    days = {}
+    for sha, path in analysis.execute(
+            "SELECT DISTINCT i.sha256, i.path FROM faces f JOIN images i ON i.sha256 = f.sha256 "
+            "WHERE f.person_id = ?", (person_id,)):
+        if sha not in skip and _is_photo(path):
+            days.setdefault(os.path.dirname(path), []).append(sha)
+    return days
+
+
+def random_person_photo(catalog, days, rng=random):
+    """(sha256, dest_path, taken_at) of a random photo of the person (days: person_days), day first like
+    random_photo; None if the pick isn't a stored photo."""
+    sha = rng.choice(days[rng.choice(sorted(days))])
+    for r in catalog.execute("SELECT dest_path, taken_at FROM files WHERE sha256 = ? AND status = 'done'", (sha,)):
+        if _is_photo(r['dest_path']):
+            return sha, r['dest_path'], r['taken_at']
+    return None
+
+
 def describe(analysis, sha):
     """Gemma's caption/setting/keywords for the photo and its score, from analysis.db."""
     r = analysis.execute("SELECT caption, setting, keywords FROM images WHERE sha256 = ?", (sha,)).fetchone()
@@ -152,27 +180,40 @@ def make_app(catalog_path, analysis_path, cache_dir, rng=random):
                 return r['dest_path']
         raise HTTPException(404)
 
+    @app.get("/api/persons")
+    def api_persons():
+        with closing(connect_ro(analysis_path)) as analysis:
+            return persons(analysis)
+
     @app.get("/api/random")
-    def api_random():
+    def api_random(person: int | None = None):
+        """A random stored photo; with person, one with that person's face in it."""
         with closing(connect_ro(catalog_path)) as catalog, closing(connect_ro(analysis_path)) as analysis:
-            folders = day_list(catalog)
-            if not folders:
-                raise HTTPException(404, "no stored photos in the catalog")
-            fresh = len(folders) > 2 * len(recent)
             hidden = {r[0] for r in analysis.execute(       # one star: never shown again
                 "SELECT sha256 FROM photo_scores WHERE score <= ?", (HIDE_SCORE,))}
+            if person is None:
+                folders = day_list(catalog)
+                pick = lambda: random_photo(catalog, folders, rng, hidden)
+            else:
+                folders = person_days(analysis, person, hidden)
+                pick = lambda: random_person_photo(catalog, folders, rng)
+            if not folders:
+                raise HTTPException(404, "no stored photos of this person" if person is not None
+                                    else "no stored photos in the catalog")
+            fresh = len(folders) > 2 * len(recent)
             for _ in range(20):         # skip catalog rows whose file isn't there (store offline, moved)
-                hit = random_photo(catalog, folders, rng, hidden)
+                hit = pick()
                 if hit is None:
                     continue
                 sha, path, taken_at = hit
                 day = os.path.dirname(path)
+                if not os.path.exists(path):
+                    continue
                 with lock:
                     if fresh and day in recent:
                         continue
                     recent.append(day)
-                if os.path.exists(path):
-                    return {'sha': sha, 'path': path, 'taken_at': taken_at, **describe(analysis, sha)}
+                return {'sha': sha, 'path': path, 'taken_at': taken_at, **describe(analysis, sha)}
         raise HTTPException(503, "photos in the catalog are missing on disk (is the store mounted?)")
 
     @app.get("/api/photo/{sha}")
@@ -239,7 +280,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   #date { font-size: 22px; font-weight: 600; letter-spacing: .01em; text-shadow: 0 1px 4px #000; }
   #cap { margin-top: 6px; max-width: 70em; line-height: 1.4; color: #ddd; text-shadow: 0 1px 3px #000; }
   #meta { margin-top: 6px; font-size: 12px; color: #999; }
-  #badge { position: fixed; top: 18px; right: 22px; padding: 4px 11px; border-radius: 14px;
+  #badge { position: fixed; top: 52px; right: 22px; padding: 4px 11px; border-radius: 14px;
            background: rgba(0,0,0,.55); font-size: 18px; letter-spacing: 2px; display: none; }
   #badge.low { color: #f88; } #badge.high { color: #fd6; }
   #flash { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(.9);
@@ -249,14 +290,19 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   #state { position: fixed; top: 18px; left: 22px; padding: 4px 11px; border-radius: 14px;
            background: rgba(0,0,0,.55); font-size: 13px; color: #ccc; opacity: 0; transition: opacity .4s; }
   #state.on { opacity: 1; }
-  #help { position: fixed; top: 52px; left: 22px; font-size: 12px; color: #888; line-height: 1.6;
+  #help { position: fixed; top: 86px; left: 22px; font-size: 12px; color: #888; line-height: 1.6;
           background: rgba(0,0,0,.55); padding: 8px 12px; border-radius: 8px; display: none; }
   body.cursor #help { display: block; }
+  /* Sits at the right end of the shared nav bar (and shows with it, like the help). */
+  #who { position: fixed; top: 4px; right: 12px; z-index: 1001; display: none; font: 13px inherit;
+         padding: 4px 8px; border-radius: 6px; border: 1px solid #555; background: #222; color: #eee; cursor: pointer; }
+  body.cursor #who, #who.set { display: block; }
   kbd { border: 1px solid #555; border-radius: 3px; padding: 0 4px; color: #ccc; }
 </style></head><body>
 <div class="slide" id="s0"><div class="bg"></div><img alt=""></div>
 <div class="slide" id="s1"><div class="bg"></div><img alt=""></div>
 <div id="info"><div id="date"></div><div id="cap"></div><div id="meta"></div></div>
+<select id="who" title="Only photos with this person in them"><option value="">Everyone</option></select>
 <div id="badge"></div><div id="flash"></div><div id="state"></div>
 <div id="help"><kbd>space</kbd> play / pause &nbsp; <kbd>←</kbd> <kbd>→</kbd> back / next<br>
 <kbd>1</kbd>–<kbd>5</kbd> score &nbsp; <kbd>0</kbd> clear score &nbsp; <kbd>+</kbd> <kbd>-</kbd> pace &nbsp;
@@ -268,12 +314,15 @@ let pace = +(localStorage.getItem('shuffle-pace') || 8000);   // ms each photo s
 let playing = true, timer = null, due = 0, left = 0;
 let history = [], at = -1;             // photos shown; at = the one on screen
 const ahead = [];                      // prefetched random photos, decoded and ready
+let person = '';                       // persons.id to show only photos of, '' for everyone
+try { person = localStorage.getItem('shuffle-person') || ''; } catch (_) {}
+let gen = 0;                           // bumped when the person changes: older prefetches are dropped
 let front = 0, anim = null, busy = false, queued = 0;   // queued: arrow presses made while loading
 let autoAt = 0, outgoing = null;   // when the timer last changed photo, and the photo it faded out
 
 async function fetchRandom() {
   for (let i = 0; i < 5; i++) {
-    const r = await fetch('api/random');
+    const r = await fetch('api/random' + (person ? '?person=' + person : ''));
     if (!r.ok) { await new Promise(ok => setTimeout(ok, 1500)); continue; }
     const p = await r.json();
     if (await preload(p)) return p;
@@ -292,7 +341,13 @@ let filling = false;
 async function fill() {
   if (filling) return;
   filling = true;
-  try { while (ahead.length < 4) { const p = await fetchRandom(); if (!p) break; ahead.push(p); } }
+  try {
+    while (ahead.length < 4) {
+      const g = gen, p = await fetchRandom();
+      if (!p) break;
+      if (g == gen) ahead.push(p);
+    }
+  }
   finally { filling = false; }
 }
 
@@ -319,7 +374,7 @@ function show(p) {
   const img = back.querySelector('img');
   img.getAnimations().forEach(a => a.cancel());
   img.src = `photo/${p.sha}.jpg`;
-  back.querySelector('.bg').style.backgroundImage = `url(/photo/${p.sha}.jpg)`;
+  back.querySelector('.bg').style.backgroundImage = `url(photo/${p.sha}.jpg)`;
   anim = kenBurns(img);
   if (!playing) anim.pause();
   back.classList.add('on'); cur.classList.remove('on');
@@ -407,8 +462,31 @@ async function score(n) {
   if (n) step(1);                     // scored: on to the next photo
 }
 
+async function loadPersons() {
+  const sel = $('#who');
+  let list = [];
+  try { list = await (await fetch('api/persons')).json(); } catch (_) {}
+  for (const p of list) {
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = `${p.name} (${p.photos.toLocaleString()})`;
+    sel.appendChild(o);
+  }
+  if (person && !list.some(p => String(p.id) == person)) person = '';
+  sel.value = person;
+  sel.classList.toggle('set', !!person);
+}
+$('#who').addEventListener('change', e => {
+  person = e.target.value;
+  try { localStorage.setItem('shuffle-person', person); } catch (_) {}
+  e.target.classList.toggle('set', !!person);
+  e.target.blur();                      // arrow keys and digits go back to the slideshow
+  gen++; ahead.length = 0;
+  status(person ? 'Photos of ' + e.target.selectedOptions[0].textContent.replace(/ \(.*/, '') : 'Everyone');
+  step(1); fill();
+});
+
 document.addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target.id == 'who') return;
   if (e.key == ' ') { e.preventDefault(); toggle(); }
   else if (e.key == 'ArrowRight') { e.preventDefault(); step(1); }
   else if (e.key == 'ArrowLeft') { e.preventDefault(); step(-1); }
@@ -428,9 +506,9 @@ document.addEventListener('mousemove', () => {
   document.body.classList.add('cursor');
   clearTimeout(idle); idle = setTimeout(() => document.body.classList.remove('cursor'), 2500);
 });
-document.addEventListener('click', e => { if (e.target.closest('#help')) return; e.clientX < innerWidth / 3 ? step(-1) : step(1); });
+document.addEventListener('click', e => { if (e.target.closest('#help, #who')) return; e.clientX < innerWidth / 3 ? step(-1) : step(1); });
 
-(async () => { status('Loading…', true); await step(1); fill(); })();
+(async () => { status('Loading…', true); await loadPersons(); await step(1); fill(); })();
 </script></body></html>"""
 
 

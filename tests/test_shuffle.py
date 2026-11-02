@@ -80,3 +80,40 @@ def test_shuffle_picks_the_day_first_so_bursts_dont_crowd_out_other_days(tmp_pat
     skip = {'s1'} | {f'b{i}' for i in range(199)}          # one-star photos
     picks = {random_photo(conn, days, rng, skip) for _ in range(50)}
     assert picks == {('b199', f'{burst}/0199.jpg', None), None}
+
+
+def test_shuffle_can_show_only_photos_of_one_person(tmp_path):
+    pytest.importorskip('fastapi')
+    pytest.importorskip('httpx')
+    from fastapi.testclient import TestClient
+    from photo_organizer.analysis import ark
+    from photo_organizer.analysis.shuffle import make_app
+    day = tmp_path / 'ark' / '2012' / '07' / '2012-07-04'
+    day.mkdir(parents=True)
+    catalog = str(tmp_path / 'catalog.db')
+    conn = init_db(catalog)
+    for name, color in [('ann.jpg', (200, 0, 0)), ('bob.jpg', (0, 200, 0)), ('both.jpg', (0, 0, 200)),
+                        ('nobody.jpg', (90, 90, 90)), ('gone.jpg', None)]:
+        if color:
+            Image.new('RGB', (64, 48), color).save(day / name)
+        conn.execute("INSERT INTO files (filename, original_path, dest_path, sha256, status) VALUES (?, ?, ?, ?, 'done')",
+                     (name, f'/src/{name}', str(day / name), name.split('.')[0] + name[-3:]))
+    conn.commit()
+    conn.close()
+    db = str(tmp_path / 'analysis.db')
+    with ark.open_db(db) as a:
+        a.executemany("INSERT INTO persons (id, name) VALUES (?, ?)", [(1, 'Ann'), (2, 'Bob'), (3, 'Nobody shown')])
+        for sha, name, people in [('annjpg', 'ann.jpg', [1]), ('bobjpg', 'bob.jpg', [2]), ('bothjpg', 'both.jpg', [1, 2]),
+                                  ('nobodyjpg', 'nobody.jpg', []), ('gonejpg', 'gone.jpg', [1])]:
+            a.execute("INSERT INTO images (sha256, path) VALUES (?, ?)", (sha, str(day / name)))
+            a.executemany("INSERT INTO faces (sha256, face_idx, person_id) VALUES (?, ?, ?)",
+                          [(sha, i, pid) for i, pid in enumerate(people)])
+    client = TestClient(make_app(catalog, db, tmp_path / 'cache', rng=random.Random(3)))
+
+    assert client.get('/api/persons').json() == [{'id': 1, 'name': 'Ann', 'photos': 3},
+                                                  {'id': 2, 'name': 'Bob', 'photos': 2}]
+    seen = {client.get('/api/random?person=1').json()['sha'] for _ in range(30)}
+    assert seen == {'annjpg', 'bothjpg'}, "Ann's photos only; one missing on disk is skipped"
+    assert {client.get('/api/random?person=2').json()['sha'] for _ in range(30)} == {'bobjpg', 'bothjpg'}
+    assert client.get('/api/random?person=3').status_code == 404
+    assert 'nobodyjpg' in {client.get('/api/random').json()['sha'] for _ in range(40)}
