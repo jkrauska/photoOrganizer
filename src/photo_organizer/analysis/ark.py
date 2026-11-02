@@ -541,6 +541,7 @@ def main():
         vlm = VisionModel(args.model)
         days.run_days(conn, found, vlm, vlm.text, args.model, seed=args.seed, limit=args.limit,
                       gap_minutes=args.gap, per_burst=args.per_burst, max_samples=args.max_samples,
+                      refresh=lambda: days.select_days(args.catalog, args.year, args.prefix, args.dest),
                       log=lambda s: print(s, flush=True))
     elif args.cmd == 'seed-names':
         t = time.time()

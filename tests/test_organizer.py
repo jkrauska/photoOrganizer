@@ -1138,3 +1138,60 @@ def test_names_differing_only_in_case_get_separate_files(env):
     go(workers=2)
     assert len(files_under(dest)) == 2
     assert all(r['status'] == 'done' for r in rows().values())
+
+
+def test_ark_days_pick_up_new_day_folders_while_running(tmp_path):
+    from datetime import datetime
+    from photo_organizer.analysis import ark, days
+    def day(name, n):
+        d = tmp_path / name
+        d.mkdir()
+        out = []
+        for i in range(n):
+            Image.new('RGB', (8, 8)).save(d / f'{i}.jpg')
+            out.append((f'{name}-{i}', str(d / f'{i}.jpg'), datetime(2012, 1, 1, 10, i)))
+        return str(d), out
+    a, b = day('2012-01-01', 2), day('2012-02-02', 3)
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    store = {a[0]: a[1]}
+    vlm = lambda p: {'caption': 'x'}
+    summary = lambda prompt: {'title': 't', 'summary': 's'}
+
+    def refresh():
+        store[b[0]] = b[1]          # the organizer moved a new day in while the run was going
+        return dict(store)
+    assert days.run_days(conn, dict(store), vlm, summary, refresh=refresh, refresh_every=0,
+                         log=lambda s: None) == 2
+    assert {r[0] for r in conn.execute("SELECT day FROM days")} == {a[0], b[0]}
+
+
+def test_analysis_progress_reads_counts_and_the_newest_logs(tmp_path):
+    from photo_organizer.analysis import ark, days, progress
+    from photo_organizer.db import init_db
+    cat_db = str(tmp_path / 'catalog.db')
+    cat = init_db(cat_db)
+    for i, p in enumerate(['/s/2010/01/2010-01-01/a.jpg', '/s/2010/01/2010-01-01/b.jpg',
+                           '/s/2011/02/2011-02-02/c.jpg', '/s/2011/02/2011-02-02/v.mov']):
+        cat.execute("INSERT INTO files (original_path, filename, file_size, status, sha256, dest_path) "
+                    "VALUES (?, ?, 1, 'done', ?, ?)", (f'/src/{i}', os.path.basename(p), f'h{i}', p))
+    cat.commit()
+    cat.close()
+    adb = str(tmp_path / 'analysis.db')
+    assert progress.snapshot(cat_db, adb) == {'available': False}
+    conn = ark.open_db(adb)
+    days.init(conn)
+    conn.execute("INSERT INTO images (sha256, path, faces_at) VALUES ('h0', '/s/a.jpg', 'now')")
+    conn.execute("INSERT INTO days (day, date, title, n_images, summarized_at) VALUES ('/s/2010/01/2010-01-01', "
+                 "'2010-01-01', 'New Year', 2, '2026-11-02T10:00:00')")
+    conn.commit()
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    (logs / 'ark-faces-spread-1.log').write_text("100 images\n[7/50] a.jpg  0 faces  0.3s  (2.50/s, 3 min left)\n")
+    (logs / 'ark-days-1.log').write_text("[4, 10 left] 2010-01-01  2 photos\n    t: s\n"
+                                         "[5, 9 left] 2011-02-02  3 photos, 1 bursts, 3 sampled  50s  (0.2 h left)\n")
+    s = progress.snapshot(cat_db, adb, str(logs), running={'faces': True, 'days': False})
+    f, d = s['faces'], s['days']
+    assert (f['images_done'], f['images_total']) == (1, 3)
+    assert f['job']['running'] and (f['job']['done'], f['job']['todo'], f['job']['eta_s']) == (7, 50, 180)
+    assert (d['summarized'], d['days_total'], d['latest'][0]['title']) == (1, 2, 'New Year')
+    assert not d['job']['running'] and (d['job']['done'], d['job']['left'], d['job']['last_day']) == (5, 9, '2011-02-02')

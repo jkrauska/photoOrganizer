@@ -257,9 +257,12 @@ def _redo_next(conn, days):
     return None
 
 
-def run_days(conn, days, vlm_fn, summary_fn, vlm_name=None, seed=None, limit=0, min_photos=2, log=print, **kw):
+def run_days(conn, days, vlm_fn, summary_fn, vlm_name=None, seed=None, limit=0, min_photos=2, log=print,
+             refresh=None, refresh_every=1800, **kw):
     """Summarize days not yet summarized, in random order; days marked wrong go first, and are
-    checked for before every day, so marking one in the browser takes effect within a day's time."""
+    checked for before every day, so marking one in the browser takes effect within a day's time.
+    refresh() returns the store's days again (select_days); new day folders the organizer has added
+    since are shuffled into what's left, every refresh_every seconds."""
     init(conn)
     days = {d: items for d, items in days.items() if len(items) >= min_photos}   # one photo: no day to sum up
     done = {r[0] for r in conn.execute("SELECT day FROM days WHERE summarized_at IS NOT NULL")}
@@ -269,8 +272,22 @@ def run_days(conn, days, vlm_fn, summary_fn, vlm_name=None, seed=None, limit=0, 
         todo = todo[:limit]
     log(f"{len(days):,} days, {len(done & set(days)):,} already summarized, {len(todo):,} to do (random order)")
     start, n, failed = time.time(), 0, set()
+    rng, refreshed = random.Random(seed), time.time()
     with tempfile.TemporaryDirectory(prefix='ark-days-') as tmpdir:
         while True:
+            if refresh and not limit and time.time() - refreshed >= refresh_every:
+                refreshed = time.time()
+                try:
+                    found = {d: v for d, v in refresh().items() if len(v) >= min_photos}
+                except Exception as e:
+                    log(f"refresh failed: {type(e).__name__}: {e}")
+                    found = {}
+                new = [d for d in found if d not in days]
+                days.update(found)          # also picks up photos added to days already known
+                if new:
+                    todo += new
+                    rng.shuffle(todo)
+                    log(f"{len(new):,} new day folders in the store; {len(todo):,} to do")
             redo, kind = _redo_next(conn, days) or (None, None)
             if redo and redo['day'] in failed:
                 redo = None
