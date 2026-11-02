@@ -10,6 +10,8 @@ serves the LAN, with no login); Open folder and Show in Finder work only from th
 only for folders listed in the days table.
 "This is wrong" queues the day for re-analysis with more frames (days.mark_wrong); the running
 photo-ark-analyze days job picks it up before its next day.
+The Context box under each day stores what the person knows about it (days.set_context): it goes
+into every summary of that day, and changing it has the days job redo the day.
 """
 
 import argparse
@@ -38,7 +40,8 @@ DEFAULT_THUMBS = '~/.photo-organizer/day-thumbs'
 
 SEARCH_FIELDS = ("d.day || ' ' || coalesce(d.title,'') || ' ' || coalesce(d.summary,'') || ' ' || "
                  "coalesce(d.keywords,'') || ' ' || coalesce(d.setting,'') || ' ' || "
-                 "coalesce(d.event_type,'') || ' ' || coalesce(d.people,'')")
+                 "coalesce(d.event_type,'') || ' ' || coalesce(d.people,'') || ' ' || coalesce(c.context,'')")
+FROM = "days d LEFT JOIN day_context c ON c.day = d.day"
 ORDERS = {'newest': 'd.date DESC, d.day DESC', 'oldest': 'd.date, d.day',
           'recent': 'd.summarized_at DESC', 'biggest': 'd.n_images DESC'}
 
@@ -69,8 +72,8 @@ def search_days(conn, q='', year=None, order='newest', limit=60, offset=0):
         where.append("substr(d.date, 1, 4) = ?")
         args.append(str(year))
     sql = " WHERE " + " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM days d{sql}", args).fetchone()[0]
-    rows = conn.execute(f"SELECT d.* FROM days d{sql} ORDER BY {ORDERS.get(order, ORDERS['newest'])} "
+    total = conn.execute(f"SELECT COUNT(*) FROM {FROM}{sql}", args).fetchone()[0]
+    rows = conn.execute(f"SELECT d.*, c.context FROM {FROM}{sql} ORDER BY {ORDERS.get(order, ORDERS['newest'])} "
                         "LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
     out = []
     for r in rows:
@@ -82,6 +85,7 @@ def search_days(conn, q='', year=None, order='newest', limit=60, offset=0):
             'setting': r['setting'], 'keywords': json.loads(r['keywords'] or '[]'),
             'people': json.loads(r['people'] or '[]'),
             'wrong_at': r['wrong_at'], 'wrong_note': r['wrong_note'], 'attempt': r['attempt'] or 0,
+            'context': r['context'] or '', 'context_pending': r['context'] != r['context_used'],
             'bursts': [{'start': b['start'], 'end': b['end'], 'n': b['n'],
                         'samples': [{'sha': s, 'caption': caps.get(s)} for s in b['samples']]}
                        for b in bursts]})
@@ -108,6 +112,11 @@ def _local(request):
 class WrongIn(BaseModel):
     day: str
     note: str = ''
+
+
+class ContextIn(BaseModel):
+    day: str
+    context: str = ''
 
 
 class OpenIn(BaseModel):
@@ -160,6 +169,14 @@ def make_app(db_path, thumb_dir, opener=None):
         with closing(open_db(db_path)) as rw:
             if not days_mod.mark_wrong(rw, body.day, body.note):
                 raise HTTPException(404)
+        return {'ok': True}
+
+    @app.post("/api/context")
+    def context(body: ContextIn):
+        if not conn.execute("SELECT 1 FROM days WHERE day = ?", (body.day,)).fetchone():
+            raise HTTPException(404)
+        with closing(open_db(db_path)) as rw:
+            days_mod.set_context(rw, body.day, body.context)
         return {'ok': True}
 
     @app.get("/api/local")
@@ -229,6 +246,8 @@ main { padding:16px; display:grid; gap:14px; grid-template-columns:repeat(auto-f
 .badge { font-size:12px; padding:2px 8px; border-radius:999px; background:#f6d38a; color:#3a2a00; }
 .badge.redone { background:var(--chip); color:var(--muted); }
 button.wrong { border-color:#c4542d; color:#c4542d; }
+textarea.ctx { width:100%; font:inherit; font-size:13px; padding:5px 8px; border:1px solid var(--line);
+  border-radius:8px; background:var(--bg); color:var(--ink); resize:vertical; min-height:32px; margin-top:6px; }
 .path code { font-size:12px; color:var(--muted); word-break:break-all; }
 button.open { font:inherit; font-size:13px; padding:4px 10px; border-radius:8px; border:1px solid var(--accent);
   background:transparent; color:var(--accent); cursor:pointer; }
@@ -280,7 +299,10 @@ function card(d) {
     <span class="meta">${d.n_images} photos${d.event_type ? ' · ' + esc(d.event_type) : ''}${d.setting ? ' · ' + esc(d.setting) : ''}</span></div>
     ${d.wrong_at ? `<span class="badge">Queued for re-analysis${d.wrong_note ? ': ' + esc(d.wrong_note) : ''}</span>`
       : d.attempt ? `<span class="badge redone">Re-analyzed${d.wrong_note ? ' after: ' + esc(d.wrong_note) : ''}</span>` : ''}
-    <div class="summary">${esc(d.summary)}</div><div class="chips">${chips}</div><div class="bursts">${bursts}</div>
+    <div class="summary">${esc(d.summary)}</div>
+    <textarea class="ctx" rows="1" data-day="${esc(d.day)}" data-prev="${esc(d.context)}"
+      placeholder="Context: who, where, what the occasion was… (the day is re-analyzed with it)">${esc(d.context)}</textarea>
+    ${d.context_pending ? '<span class="badge">Queued for re-analysis with this context</span>' : ''}<div class="chips">${chips}</div><div class="bursts">${bursts}</div>
     <div class="path"><button class="open" data-open="${esc(d.day)}">${local ? 'Open folder' : 'Copy path'}</button>
     ${d.wrong_at ? '' : `<button class="open wrong" data-wrong="${esc(d.day)}">This is wrong</button>`}<code>${esc(d.day)}</code></div></article>`;
 }
@@ -303,6 +325,22 @@ async function markWrong(btn) {
   btn.insertAdjacentHTML('afterend', `<span class="badge">Queued for re-analysis${note ? ': ' + esc(note) : ''}</span>`);
   btn.remove();
 }
+
+// A context box saves when it loses focus (or on Cmd/Ctrl-Enter) if its text changed.
+async function saveContext(ta) {
+  const context = ta.value.trim();
+  if (context === ta.dataset.prev) return;
+  const r = await fetch('/api/context', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                         body: JSON.stringify({day: ta.dataset.day, context})});
+  if (!r.ok) { alert('Could not save the context'); return; }
+  ta.dataset.prev = context;
+  if (!ta.nextElementSibling?.classList.contains('badge'))
+    ta.insertAdjacentHTML('afterend', '<span class="badge">Queued for re-analysis with this context</span>');
+}
+document.addEventListener('focusout', e => { if (e.target.classList?.contains('ctx')) saveContext(e.target); });
+document.addEventListener('keydown', e => {
+  if (e.target.classList?.contains('ctx') && e.key == 'Enter' && (e.metaKey || e.ctrlKey)) e.target.blur();
+});
 
 document.addEventListener('click', e => {
   const t = e.target;

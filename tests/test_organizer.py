@@ -898,15 +898,15 @@ def test_ark_days_summarize_random_days_once_from_sampled_captions(tmp_path):
         prompts.append(prompt)
         return {'title': 'Beach day', 'summary': 'A day at the beach.', 'keywords': ['beach', 3]}
 
-    assert days.run_days(conn, found, vlm, summary, 'gemma', seed=1, max_samples=4, log=lambda s: None) == 2
-    assert len(captioned) == 5                       # 4 of the 6 hourly bursts + the single photo
+    assert days.run_days(conn, found, vlm, summary, 'gemma', seed=1, max_samples=4, log=lambda s: None) == 1
+    assert len(captioned) == 4                       # 4 of the 6 hourly bursts; the single-photo day is skipped
     big = next(p for p in prompts if '6 photos' in p)
     assert 'Saturday' in big and '6 burst(s)' in big and 'frame' in big and '[beach]' in big
     row = conn.execute("SELECT * FROM days WHERE n_images = 6").fetchone()
     assert row['title'] == 'Beach day' and json.loads(row['keywords']) == ['beach']
     assert sum(len(b['samples']) for b in json.loads(row['bursts'])) == 4
     assert days.run_days(conn, found, vlm, summary, 'gemma', log=lambda s: None) == 0   # done days skipped
-    assert len(captioned) == 5
+    assert len(captioned) == 4
 
 
 def test_ark_spread_order_takes_a_few_images_from_every_year_per_round(tmp_path):
@@ -972,6 +972,11 @@ def test_ark_day_browser_searches_summaries_and_captions_and_opens_only_known_da
     assert client.post('/api/wrong', json={'day': '/nope'}).status_code == 404
     beach = client.get('/api/days', params={'q': 'surf'}).json()['items'][0]
     assert beach['wrong_at'] and beach['wrong_note'] == 'St. Louis'
+    assert beach['context'] == '' and not beach['context_pending']
+    assert client.post('/api/context', json={'day': str(day), 'context': 'Aunt Jo visiting'}).status_code == 200
+    assert client.post('/api/context', json={'day': '/nope', 'context': 'x'}).status_code == 404
+    beach = client.get('/api/days', params={'q': 'aunt jo'}).json()['items'][0]    # context is searchable
+    assert beach['context'] == 'Aunt Jo visiting' and beach['context_pending']
 
 
 def test_ark_faces_cluster_detail_lists_unnamed_faces_before_named_ones(tmp_path):
@@ -1015,3 +1020,16 @@ def test_ark_days_marked_wrong_are_redone_first_with_more_frames_and_the_note(tm
     assert row['title'] == 'Game 2' and row['attempt'] == 1 and row['wrong_at'] is None
     assert row['wrong_note'] == 'Busch Stadium, St. Louis' and row['prev_summary'] == 'Game 1: At a ballgame.'
     assert len(json.loads(row['bursts'])[0]['samples']) == 12   # twice the frames on a redo
+
+    days.set_context(conn, str(d), ' Cardinals vs Cubs with Grandpa ')    # context: redone, same frames
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None) == 1
+    assert 'Context from the person who took the photos' in prompts[2] and 'Cardinals vs Cubs' in prompts[2]
+    assert 'Busch Stadium, St. Louis' in prompts[2], "the earlier correction is kept"
+    row = conn.execute("SELECT * FROM days").fetchone()
+    assert row['attempt'] == 1 and len(json.loads(row['bursts'])[0]['samples']) == 12
+    assert row['context_used'] == 'Cardinals vs Cubs with Grandpa'
+    days.set_context(conn, str(d), 'Cardinals vs Cubs with Grandpa')       # unchanged: nothing to do
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None) == 0
+    days.set_context(conn, str(d), '')                                    # removed: redone without it
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None) == 1
+    assert 'Context from' not in prompts[3] and days.get_context(conn, str(d)) is None
