@@ -231,6 +231,8 @@ svg { width:100%; height:90px; display:block; }
   <div class="card"><div class="k">Batch</div><div class="v" id="batch">–</div><div class="s" id="batchs"></div>
     <div class="progress"><div id="bar" style="width:0"></div></div></div>
 </div>
+<div class="card" id="anacard" style="margin-bottom:12px;display:none"><h2>Analysis</h2>
+  <div class="two" style="margin:0"><div id="anaf"></div><div id="anad"></div></div></div>
 <div class="card" id="largecard" style="margin-bottom:12px;display:none"><h2>Large files in flight</h2><div id="large"></div></div>
 <div class="card" style="margin-bottom:12px"><h2>Queue <span id="worker" class="s" style="text-transform:none;letter-spacing:0"></span></h2>
   <form id="qform" class="qform" autocomplete="off">
@@ -406,7 +408,38 @@ $('qphotos').onclick = async () => {
     body: JSON.stringify({photos: true})})).json();
   qmsg(r); tick();
 };
+function block(el, title, value, pct, lines) {
+  const k = document.createElement('div'); k.className = 'k'; k.textContent = title;
+  const v = document.createElement('div'); v.className = 'v'; v.textContent = value;
+  const bar = document.createElement('div'); bar.className = 'progress';
+  const fill = document.createElement('div'); fill.style.width = Math.min(100, pct || 0).toFixed(1) + '%'; bar.appendChild(fill);
+  el.replaceChildren(k, v, bar, ...lines.filter(Boolean).map(t => { const d = document.createElement('div');
+    d.className = 's'; d.style.marginTop = '4px'; d.textContent = t; return d; }));
+}
+function jobLine(j, what) {
+  if (!j || !j.running) return `${what}: not running`;
+  return `${what}: running · ${num(j.done || 0)} this run` + (j.rate ? ` · ${j.rate}/s` : '')
+    + (j.eta_s != null ? ` · ~${dur(j.eta_s)} left` : '');
+}
+async function analysisTick() {
+  let a;
+  try { a = await (await fetch('/api/analysis')).json(); } catch (e) { return; }
+  $('anacard').style.display = a.available ? '' : 'none';
+  if (!a.available) return;
+  const f = a.faces, d = a.days, pct = (x, t) => t ? 100 * x / t : 0;
+  block($('anaf'), 'Faces', f.images_total ? `${pct(f.images_done, f.images_total).toFixed(0)}%` : num(f.images_done),
+    pct(f.images_done, f.images_total), [
+      `${num(f.images_done)}${f.images_total ? ' of ' + num(f.images_total) : ''} photos scanned`,
+      `${num(f.faces)} faces · ${num(f.named)} named · ${num(f.people)} people` + (f.errors ? ` · ${num(f.errors)} unreadable` : ''),
+      jobLine(f.job, 'face detection')]);
+  block($('anad'), 'Gemma day summaries', `${num(d.summarized)}${d.days_total ? ' / ' + num(d.days_total) : ''}`,
+    pct(d.summarized, d.days_total), [
+      `${num(d.captioned)} photos captioned` + (d.redo ? ` · ${num(d.redo)} days to redo` : ''),
+      jobLine(d.job, 'day summaries'),
+      ...(d.latest || []).slice(0, 3).map(x => `${x.date} · ${x.title} (${num(x.n_images)} photos)`)]);
+}
 tick(); setInterval(tick, 2000);
+analysisTick(); setInterval(analysisTick, 15000);
 </script></body></html>
 """
 
@@ -442,6 +475,15 @@ def list_subdirs(path):
     except OSError:
         names = []
     return {'path': path, 'dirs': [os.path.join(path, n) for n in names[:200]]}
+
+
+def analysis_snapshot(db_path):
+    """Face and Gemma day-summary progress; unavailable without the analysis extras."""
+    try:
+        from photo_organizer.analysis.progress import snapshot
+    except ImportError:
+        return {'available': False}
+    return snapshot(db_path)
 
 
 def local_hosts(port):
@@ -482,6 +524,8 @@ def respond(db_path, hosts, method, raw_path, headers, body=b''):
                 return 200, snapshot(db_path), None
             if url.path == '/api/archive':
                 return 200, archive_snapshot(db_path), None
+            if url.path == '/api/analysis':
+                return 200, analysis_snapshot(db_path), None
             if url.path == '/api/archive/month':
                 return 200, month_detail(db_path, query.get('ym', [''])[0]), None
         except sqlite3.Error as e:

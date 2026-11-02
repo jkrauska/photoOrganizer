@@ -43,6 +43,7 @@ def test_one_server_serves_every_page_with_the_nav_and_keeps_queue_changes_local
     assert client.get('/days/api/years').status_code == 200
     assert client.get('/api/status').status_code == 200
     assert client.get('/api/archive').status_code == 200
+    assert client.get('/api/analysis').json()['available'], "the analysis DB is there"
 
     body = json.dumps({'path': str(folder)})
     ok = {'Content-Type': 'application/json', 'Origin': 'http://localhost:8077'}
