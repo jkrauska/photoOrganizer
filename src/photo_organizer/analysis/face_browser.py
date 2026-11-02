@@ -24,7 +24,7 @@ import pillow_heif
 import uvicorn
 from PIL import Image
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from photo_organizer.analysis import ark_faces
@@ -365,6 +365,11 @@ class ArkSuggestionsIn(BaseModel):
     accept: bool
 
 
+class ArkForgetIn(BaseModel):
+    face_ids: list[int] = []
+    cluster_id: str | None = None
+
+
 def make_ark_app(db_path, crop_dir) -> FastAPI:
     """Face labeling over the photoArk analysis DB; one SQLite connection per request."""
     ark_faces.ensure_db(db_path)
@@ -410,6 +415,17 @@ def make_ark_app(db_path, crop_dir) -> FastAPI:
                 raise HTTPException(500, f"could not crop face {face_id}: {e}")
         return FileResponse(path, media_type="image/jpeg")
 
+    @ark.get("/photo/{face_id}.jpg")
+    def photo(face_id: int):
+        with db() as conn:
+            try:
+                data = ark_faces.full_image(conn, face_id)
+            except KeyError:
+                raise HTTPException(404, "face not found")
+            except Exception as e:
+                raise HTTPException(500, f"could not load the photo for face {face_id}: {e}")
+        return Response(data, media_type="image/jpeg")
+
     @ark.post("/api/label")
     def label_cluster(body: ArkLabelIn):
         with db() as conn:
@@ -431,6 +447,17 @@ def make_ark_app(db_path, crop_dir) -> FastAPI:
         fn = ark_faces.accept_suggestions if body.accept else ark_faces.reject_suggestions
         with db() as conn:
             return {"ok": True, "changed": fn(conn, body.face_ids) if body.face_ids else 0}
+
+    @ark.post("/api/forget")
+    def forget(body: ArkForgetIn):
+        """Delete faces outright (strangers, false detections): the listed ids, or a cluster's
+        unnamed faces."""
+        with db() as conn:
+            if body.cluster_id:
+                n = cluster_or_404(ark_faces.forget_cluster, conn, body.cluster_id, crop_dir)
+            else:
+                n = ark_faces.forget_faces(conn, body.face_ids, crop_dir) if body.face_ids else 0
+        return {"ok": True, "deleted": n}
 
     @ark.get("/", response_class=HTMLResponse)
     def index():
@@ -460,8 +487,18 @@ ARK_HTML = r"""<!doctype html>
   #header button, .sugg button { padding: 10px 14px; font-size: 14px; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; background: white; }
   #header button.primary { background: #2a7; color: white; border-color: #2a7; font-weight: 600; }
   #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
-  #grid figure { margin: 0; display: flex; flex-direction: column; gap: 4px; }
-  #grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; background: #eee; }
+  #grid figure { margin: 0; display: flex; flex-direction: column; gap: 4px; position: relative; }
+  #grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; background: #eee; cursor: pointer; }
+  #grid figure.selected img { outline: 4px solid #d33; outline-offset: -4px; opacity: 0.6; }
+  #grid .forget { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; border-radius: 13px; border: none;
+                  background: rgba(0,0,0,0.55); color: white; font-size: 14px; cursor: pointer; display: none; }
+  #grid figure:hover .forget { display: block; }
+  #header button.danger { border-color: #d33; color: #d33; }
+  #viewer { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; z-index: 10;
+            flex-direction: column; align-items: center; justify-content: center; gap: 8px; cursor: zoom-out; }
+  #viewer.open { display: flex; }
+  #viewer img { max-width: 95vw; max-height: 88vh; object-fit: contain; background: #222; min-width: 80px; min-height: 80px; }
+  #viewer div { color: #ddd; font-size: 13px; }
   #grid figcaption { font-size: 11px; color: #666; text-align: center; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #grid .face-name { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
   #grid .face-name.saved { background: #e8f7ee; border-color: #2a7; }
@@ -472,8 +509,9 @@ ARK_HTML = r"""<!doctype html>
   #stats { color: #888; font-size: 12px; padding: 6px 4px; }
 </style></head><body>
 <datalist id="persons"></datalist>
+<div id="viewer" onclick="closeViewer()"><img alt="Loading photo…"><div></div></div>
 <div id="sidebar"><div class="empty">Loading…</div></div>
-<div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li></ol></div></div>
+<div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li><li>Double-click a crop to see the whole photo (Esc or click to close).</li><li>Strangers or false detections: ✕ on a crop forgets it; click crops to select several, then <b>Forget selected</b>. Forgotten faces are deleted from the database.</li></ol></div></div>
 <script>
 let clusters = [];
 let currentId = null;
@@ -534,6 +572,7 @@ async function selectCluster(id) {
            <button class="primary" onclick="saveLabel(true)">Save &amp; Next ⏎</button>
          </div>`}
       <div class="row" id="suggRow"></div>
+      <div class="row" id="forgetRow"></div>
     </div>
     <div id="grid"><div class="empty">Loading faces…</div></div>`;
   const input = document.getElementById('labelInput');
@@ -552,9 +591,11 @@ async function loadFaces() {
   document.getElementById('suggRow').innerHTML = sugg.length
     ? `<button onclick="judge(${JSON.stringify(sugg.map(f => f.id))}, true)">Accept ${sugg.length} suggested name${sugg.length===1?'':'s'}</button>
        <button onclick="judge(${JSON.stringify(sugg.map(f => f.id))}, false)">Reject all suggestions</button>` : '';
+  renderForgetRow();
   document.getElementById('grid').innerHTML = faces.length ? faces.map(f => `
-    <figure>
-      <img src="${f.face_url}" loading="lazy" title="${escapeHtml(f.path)}">
+    <figure data-id="${f.id}">
+      <button class="forget" title="Forget this face (delete it)" onclick="forget([${f.id}])">✕</button>
+      <img src="${f.face_url}" loading="lazy" title="Click to select · ${escapeHtml(f.path)}" onclick="toggleSelect(this)" ondblclick="openViewer(${f.id})">
       <figcaption title="${escapeHtml(f.path)}">${escapeHtml(f.filename)} · ${(f.det_score ?? 0).toFixed(2)}</figcaption>
       ${f.source === 'suggested' ? `<div class="sugg"><span>${escapeHtml(f.name)} (${(f.score ?? 0).toFixed(2)})?</span>
         <button title="Accept" onclick="judge([${f.id}], true)">✓</button>
@@ -573,6 +614,65 @@ async function loadFaces() {
     });
     inp.addEventListener('blur', () => saveFaceLabel(inp));
   });
+}
+
+function openViewer(id) {
+  const f = faces.find(x => x.id === id);
+  // A double-click also fires two clicks; put the selection back the way it was.
+  document.querySelector(`#grid figure[data-id="${id}"]`)?.classList.remove('selected');
+  renderForgetRow();
+  const v = document.getElementById('viewer');
+  v.querySelector('img').src = `/photo/${id}.jpg`;
+  v.querySelector('div').textContent = f ? f.path : '';
+  v.classList.add('open');
+}
+
+function closeViewer() {
+  const v = document.getElementById('viewer');
+  v.classList.remove('open');
+  v.querySelector('img').removeAttribute('src');
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
+
+function selectedIds() {
+  return [...document.querySelectorAll('#grid figure.selected')].map(el => parseInt(el.dataset.id, 10));
+}
+
+function renderForgetRow() {
+  const n = selectedIds().length;
+  const unnamed = faces.filter(f => !f.name).length;
+  document.getElementById('forgetRow').innerHTML =
+    (n ? `<button class="danger" onclick="forget(selectedIds())">Forget ${n} selected</button>
+          <button onclick="clearSelection()">Clear selection</button>` : '') +
+    (currentId !== 'unclustered' && unnamed
+      ? `<button class="danger" onclick="forgetCluster(${unnamed})">Forget ${unnamed} unnamed face${unnamed===1?'':'s'} in this cluster</button>` : '');
+}
+
+function toggleSelect(img) {
+  img.parentElement.classList.toggle('selected');
+  renderForgetRow();
+}
+
+function clearSelection() {
+  document.querySelectorAll('#grid figure.selected').forEach(el => el.classList.remove('selected'));
+  renderForgetRow();
+}
+
+async function forget(ids) {
+  if (!ids.length) return;
+  await post('/api/forget', {face_ids: ids});
+  // Drop them in place so a long list keeps its scroll position.
+  ids.forEach(id => document.querySelector(`#grid figure[data-id="${id}"]`)?.remove());
+  faces = faces.filter(f => !ids.includes(f.id));
+  renderForgetRow();
+  await loadClusters();
+}
+
+async function forgetCluster(n) {
+  if (!confirm(`Delete ${n} unnamed face${n===1?'':'s'} in ${currentId}? Named and suggested faces stay.`)) return;
+  await post('/api/forget', {cluster_id: currentId});
+  await refresh();
 }
 
 async function refresh() {

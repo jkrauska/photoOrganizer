@@ -3,19 +3,22 @@
 Clusters are faces.cluster_id; faces with no cluster form 'unclustered'. Naming writes persons +
 faces.person_id with person_source='manual'. A 'suggested' name (from seed-names) can be accepted
 (it becomes 'manual') or rejected (person cleared, person_source='rejected', which seed-names skips,
-so it isn't suggested again). Kept free of FastAPI so it can be tested without the analysis extra.
+so it isn't suggested again). Strangers and false detections can be forgotten: their rows
+and cached crops are deleted. Kept free of FastAPI so it can be tested without the analysis extra.
 """
 
+import io
 import os
 import sqlite3
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from photo_organizer.analysis.ark import _person_id, load_image, open_db
 
 UNCLUSTERED = 'unclustered'
 CROP_THUMB_SIZE = 256
+FULL_MAX_SIDE = 2048
 
 
 def connect(db_path):
@@ -129,6 +132,49 @@ def reject_suggestions(conn, face_ids):
     return cur.rowcount
 
 
+def forget_faces(conn, face_ids, crop_dir=None):
+    """Delete these faces (embedding and box) and their cached crops: for strangers and false
+    detections. An image is only scanned for faces once, so normal runs don't bring them back."""
+    marks = ','.join('?' * len(face_ids))
+    rows = conn.execute(f"SELECT sha256, face_idx, x1, y1, x2, y2 FROM faces WHERE id IN ({marks})",
+                        face_ids).fetchall()
+    cur = conn.execute(f"DELETE FROM faces WHERE id IN ({marks})", face_ids)
+    conn.commit()
+    if crop_dir:
+        for r in rows:
+            _crop_path(crop_dir, r).unlink(missing_ok=True)
+    return cur.rowcount
+
+
+def forget_cluster(conn, cid, crop_dir=None):
+    """Forget the faces in a cluster that have no name (manual or suggested). Returns faces deleted."""
+    where, params = _cluster_where(cid)
+    ids = [r[0] for r in conn.execute(f"SELECT f.id FROM faces f WHERE {where} AND f.person_id IS NULL", params)]
+    return forget_faces(conn, ids, crop_dir) if ids else 0
+
+
+def _crop_path(crop_dir, r):
+    x1, y1, x2, y2 = (int(round(v)) for v in (r['x1'], r['y1'], r['x2'], r['y2']))
+    return Path(crop_dir) / f"{r['sha256']}_{r['face_idx']}_{x1}_{y1}_{x2}_{y2}.jpg"
+
+
+def full_image(conn, face_id, max_side=FULL_MAX_SIDE):
+    """JPEG bytes of the whole photo a face is in (EXIF-oriented, scaled down), with the face boxed."""
+    r = conn.execute("SELECT f.x1, f.y1, f.x2, f.y2, i.path FROM faces f JOIN images i ON i.sha256 = f.sha256 "
+                     "WHERE f.id = ?", (face_id,)).fetchone()
+    if r is None:
+        raise KeyError(face_id)
+    img, _ = load_image(r['path'])
+    scale = min(1.0, max_side / max(img.size))
+    if scale < 1:
+        img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+    box = [v * scale for v in (r['x1'], r['y1'], r['x2'], r['y2'])]
+    ImageDraw.Draw(img).rectangle(box, outline=(255, 210, 0), width=max(3, img.width // 300))
+    buf = io.BytesIO()
+    img.save(buf, 'JPEG', quality=88)
+    return buf.getvalue()
+
+
 def ensure_crop(conn, face_id, crop_dir):
     """Path of a cached JPEG crop of this face, cut from the EXIF-oriented image the bbox refers to.
     The cache name includes hash, index and bbox, so a re-detected face never shows a stale crop."""
@@ -137,7 +183,7 @@ def ensure_crop(conn, face_id, crop_dir):
     if r is None:
         raise KeyError(face_id)
     x1, y1, x2, y2 = (int(round(v)) for v in (r['x1'], r['y1'], r['x2'], r['y2']))
-    out = Path(crop_dir) / f"{r['sha256']}_{r['face_idx']}_{x1}_{y1}_{x2}_{y2}.jpg"
+    out = _crop_path(crop_dir, r)
     if out.exists():
         return out
     img, _ = load_image(r['path'])

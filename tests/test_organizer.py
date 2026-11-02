@@ -748,8 +748,26 @@ def test_ark_faces_crops_from_the_oriented_image(tmp_path):
     r, g, b = bottom.getpixel((20, 35))
     assert b > 200 and r < 60
     assert len(list(crops.iterdir())) == 2
+    import io
+    full = Image.open(io.BytesIO(ark_faces.full_image(conn, 3))).convert('RGB')
+    assert full.size == (40, 80), "the whole photo, oriented"
     with pytest.raises(KeyError):
         ark_faces.ensure_crop(conn, 99, crops)
+
+
+def test_ark_faces_forget_deletes_faces_and_crops_but_keeps_named_ones(tmp_path):
+    from photo_organizer.analysis import ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    crops = tmp_path / 'crops'
+    ark_faces.ensure_crop(conn, 4, crops)
+    assert ark_faces.forget_faces(conn, [4, 99], crops) == 1
+    assert not list(crops.iterdir()), "a forgotten face's crop goes too"
+    ark_faces.name_faces(conn, [1], 'Alice')
+    conn.execute("UPDATE faces SET person_id = 1, person_source = 'suggested' WHERE id = 2")
+    conn.commit()
+    assert ark_faces.forget_cluster(conn, 'c0', crops) == 1
+    assert sorted(_ark_names(conn)) == [1, 2]
+    assert [c['id'] for c in ark_faces.list_clusters(conn)] == ['c0']
 
 
 def test_ark_face_browser_app_names_over_http(tmp_path):
@@ -765,4 +783,10 @@ def test_ark_face_browser_app_names_over_http(tmp_path):
     assert client.post('/api/label_face', json={'face_id': 99, 'label': 'Bob'}).status_code == 404
     assert client.get('/api/cluster/c9x').status_code == 404
     assert client.get('/face/1.jpg').headers['content-type'] == 'image/jpeg'
+    assert client.get('/photo/1.jpg').headers['content-type'] == 'image/jpeg'
+    assert client.get('/photo/99.jpg').status_code == 404
     assert client.get('/api/persons').json() == ['Alice', 'Bob']
+    assert client.post('/api/forget', json={'face_ids': [4]}).json()['deleted'] == 1
+    client.post('/api/label_face', json={'face_id': 3, 'label': ''})
+    assert client.post('/api/forget', json={'cluster_id': 'c0'}).json()['deleted'] == 1
+    assert client.post('/api/forget', json={'cluster_id': 'bad'}).status_code == 404
