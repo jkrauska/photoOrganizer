@@ -987,6 +987,43 @@ def test_ark_faces_cluster_detail_lists_unnamed_faces_before_named_ones(tmp_path
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0')] == [2, 3, 1]
 
 
+def test_ark_faces_cluster_detail_bands_unnamed_faces_by_similarity_in_shooting_order(tmp_path):
+    from photo_organizer.analysis import ark, ark_faces
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    rng = np.random.default_rng(3)
+    unit = lambda v: (v / np.linalg.norm(v)).astype(np.float32)
+    alice = unit(rng.normal(size=512))
+    near = lambda: unit(alice + 0.3 * rng.normal(size=512) / np.sqrt(512))
+    r = rng.normal(size=512)
+    other = unit(r - (r @ alice) * alice)                         # orthogonal to Alice
+    stray = lambda: unit(0.45 * alice + 0.89 * other + 0.01 * rng.normal(size=512) / np.sqrt(512))  # ~0.45
+    # (face id, file, embedding, named): files named against their shooting order (see taken)
+    faces = [(1, 'a.jpg', near(), True), (2, 'b.jpg', near(), True), (3, 'c.jpg', near(), True),
+             (4, 'z.jpg', near(), False), (5, 'y.jpg', near(), False),
+             (6, 'x.jpg', stray(), False), (7, 'w.jpg', stray(), False)]
+    for fid, name, e, named in faces:
+        conn.execute("INSERT INTO images (sha256, path) VALUES (?, ?)", (f's{fid}', f'/s/2019/01/2019-01-05/{name}'))
+        conn.execute("INSERT INTO faces (id, sha256, face_idx, det_score, cluster_id, embedding) "
+                     "VALUES (?, ?, 0, 0.9, 0, ?)", (fid, f's{fid}', e.tobytes()))
+        if named:
+            ark_faces.name_faces(conn, [fid], 'Alice')
+    cat_path = tmp_path / 'catalog.db'
+    cat = sqlite3.connect(cat_path)
+    cat.execute("CREATE TABLE files (sha256 TEXT, taken_at TEXT)")
+    cat.executemany("INSERT INTO files VALUES (?, ?)", [('s4', '2019-01-05T09:00:00'), ('s5', '2019-01-05T10:00:00'),
+                                                       ('s6', '2019-01-05T11:00:00'), ('s7', '2019-01-05T12:00:00')])
+    cat.commit()
+    cat.close()
+
+    got = ark_faces.cluster_detail(conn, 'c0', catalog_path=str(cat_path))
+    assert [f['id'] for f in got] == [4, 5, 6, 7, 1, 2, 3], "similar band first, each band in shooting order"
+    assert got[0]['sim'] > 0.8 and got[0]['sim_to'] == 'Alice' and got[0]['taken'] == '2019-01-05T09:00:00'
+    assert 0.4 < got[2]['sim'] < 0.5 and 'sim' not in got[4]
+    # Without a catalog the store's date folders and filenames decide within a band.
+    assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0')][:4] == [5, 4, 7, 6]
+    assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0', limit=2)] == [5, 4]
+
+
 def test_ark_days_marked_wrong_are_redone_first_with_more_frames_and_the_note(tmp_path):
     from datetime import datetime, timedelta
     from photo_organizer.analysis import ark, days

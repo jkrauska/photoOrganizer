@@ -9,6 +9,7 @@ and cached crops are deleted. Kept free of FastAPI so it can be tested without t
 
 import io
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -79,19 +80,91 @@ def list_clusters(conn):
     return items + ([tail] if tail else [])
 
 
-def cluster_detail(conn, cid, limit=500):
+def _person_centroid(conn, pid):
+    es = [_unpack(r[0]) for r in conn.execute(
+        "SELECT embedding FROM faces WHERE person_id = ? AND person_source = 'manual' "
+        "AND embedding IS NOT NULL", (pid,))]
+    return _centroid(_unit_rows(es)) if es else None
+
+
+def _reference(conn, cid, rows):
+    """(name, unit vector) the cluster's unnamed faces are compared with: the cluster's name, else
+    the guessed name, else (name '') the average of the cluster's own faces."""
+    pid, name = _cluster_name(conn, cid)
+    if not name:
+        g = guess_cluster(conn, cid)
+        if g:
+            name = g['name']
+            pid = conn.execute("SELECT id FROM persons WHERE name = ?", (name,)).fetchone()[0]
+    ref = _person_centroid(conn, pid) if name else None
+    if ref is None:
+        es = [_unpack(r['embedding']) for r in rows if r['embedding'] is not None]
+        name, ref = '', (_centroid(_unit_rows(es)) if es else None)
+    return name, ref
+
+
+def taken_times(catalog_path, shas):
+    """{sha256: taken_at ISO string} from the organizer's catalog (read-only); {} without one."""
+    if not catalog_path or not os.path.exists(catalog_path) or not shas:
+        return {}
+    cat = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True, timeout=5)
+    try:
+        out = {}
+        shas = list(shas)
+        for i in range(0, len(shas), 900):
+            chunk = shas[i:i + 900]
+            out.update(cat.execute(f"SELECT sha256, MIN(taken_at) FROM files WHERE sha256 IN "
+                                   f"({','.join('?' * len(chunk))}) AND taken_at IS NOT NULL "
+                                   f"GROUP BY sha256", chunk).fetchall())
+        return out
+    except sqlite3.Error:
+        return {}
+    finally:
+        cat.close()
+
+
+_DAY = re.compile(r'(\d{4}-\d{2}-\d{2})')
+
+
+def _when(path, taken):
+    """Sort key for when a photo was taken: the catalog's time, else the store's date folder."""
+    if taken:
+        return taken
+    m = _DAY.search(path)
+    return m.group(1) if m else '9999'
+
+
+def cluster_detail(conn, cid, limit=500, catalog_path=None):
     """Faces of a cluster: not yet named by hand first (the ones to review), then the named ones
-    grouped by name; best detections first within each."""
+    grouped by name. The unnamed ones come in similarity bands of 0.1 (to the cluster's name or
+    guessed name, else to the cluster's average face), most similar band first and in shooting
+    order within a band (catalog_path gives the times), so a shoot's wrong matches sit together;
+    unclustered faces go by detection score."""
     where, params = _cluster_where(cid)
     rows = conn.execute(
-        f"SELECT f.id, f.sha256, f.face_idx, f.det_score, f.person_source, f.person_score, "
+        f"SELECT f.id, f.sha256, f.face_idx, f.det_score, f.person_source, f.person_score, f.embedding, "
         f"p.name, i.path FROM faces f JOIN images i ON i.sha256 = f.sha256 "
         f"LEFT JOIN persons p ON p.id = f.person_id WHERE {where} "
-        f"ORDER BY f.person_source IS 'manual', p.name, f.det_score DESC, f.id LIMIT ?",
-        (*params, limit)).fetchall()
+        f"ORDER BY f.person_source IS 'manual', p.name, f.det_score DESC, f.id", params).fetchall()
+    todo = [r for r in rows if r['person_source'] != 'manual']
+    named = [r for r in rows if r['person_source'] == 'manual']
+    sim, sim_to, taken = {}, '', {}
+    if cid != UNCLUSTERED and todo:
+        sim_to, ref = _reference(conn, cid, rows)
+        if ref is not None:
+            have = [r for r in todo if r['embedding'] is not None]
+            if have:
+                sim = dict(zip([r['id'] for r in have],
+                               (_unit_rows([_unpack(r['embedding']) for r in have]) @ ref).tolist()))
+            taken = taken_times(catalog_path, {r['sha256'] for r in todo})
+            band = lambda r: int(np.floor(sim[r['id']] * 10)) if r['id'] in sim else -99
+            todo.sort(key=lambda r: (-band(r), _when(r['path'], taken.get(r['sha256'])), r['path'], r['id']))
     return [{'id': r['id'], 'filename': os.path.basename(r['path']), 'path': r['path'],
              'det_score': r['det_score'], 'name': r['name'] or '', 'source': r['person_source'] or '',
-             'score': r['person_score'], 'face_url': f"/face/{r['id']}.jpg"} for r in rows]
+             'score': r['person_score'], 'face_url': f"/face/{r['id']}.jpg",
+             'taken': taken.get(r['sha256']) or '',
+             **({'sim': round(sim[r['id']], 3), 'sim_to': sim_to} if r['id'] in sim else {})}
+            for r in (todo + named)[:limit]]
 
 
 def persons(conn):

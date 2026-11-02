@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from photo_organizer.analysis import ark_faces
 from photo_organizer.analysis.ark import DEFAULT_ANALYSIS_DB
 from photo_organizer.analysis.paths import add_data_dir_arg, data_paths
+from photo_organizer.db import DEFAULT_DB_PATH
 
 pillow_heif.register_heif_opener()
 
@@ -378,7 +379,7 @@ class ArkForgetIn(BaseModel):
     cluster_id: str | None = None
 
 
-def make_ark_app(db_path, crop_dir) -> FastAPI:
+def make_ark_app(db_path, crop_dir, catalog_path=None) -> FastAPI:
     """Face labeling over the photoArk analysis DB; one SQLite connection per request."""
     ark_faces.ensure_db(db_path)
     ark = FastAPI()
@@ -405,7 +406,7 @@ def make_ark_app(db_path, crop_dir) -> FastAPI:
     @ark.get("/api/cluster/{cid}")
     def cluster(cid: str, limit: int = 500):
         with db() as conn:
-            return cluster_or_404(ark_faces.cluster_detail, conn, cid, limit)
+            return cluster_or_404(ark_faces.cluster_detail, conn, cid, limit, catalog_path)
 
     @ark.get("/api/cluster/{cid}/guess")
     def guess(cid: str):
@@ -526,6 +527,8 @@ ARK_HTML = r"""<!doctype html>
   #viewer.open { display: flex; }
   #viewer img { max-width: 95vw; max-height: 88vh; object-fit: contain; background: #222; min-width: 80px; min-height: 80px; }
   #viewer div { color: #ddd; font-size: 13px; }
+  #grid h4 { grid-column: 1 / -1; margin: 6px 0 0; font-size: 12px; color: #666; font-weight: 500; }
+  #grid h4 button { font-size: 11px; padding: 1px 8px; margin-left: 8px; }
   #grid h3 { grid-column: 1 / -1; margin: 12px 0 0; font-size: 14px; color: #444; border-bottom: 1px solid #eee; padding-bottom: 4px; }
   #grid h3:first-child { margin-top: 0; }
   #grid h3 small { color: #888; font-weight: 400; }
@@ -671,9 +674,23 @@ async function loadFaces() {
   let lastName = null;
   const groups = [];
   if (todo.length) {
+    const to = todo.find(f => f.sim !== undefined)?.sim_to;
     groups.push(heading(`Not yet named · ${todo.length}`,
-      ` <small>check these all match before naming the cluster</small>${more}`));
-    groups.push(...todo.map(figureHtml));
+      ` <small>check these all match before naming the cluster` +
+      (to !== undefined ? ` · grouped by similarity to ${to ? escapeHtml(to) : 'the cluster'}, in shooting order` : '') +
+      `</small>${more}`));
+    // Similarity bands of 0.1, most similar first; each band can be selected at once to Forget it.
+    let lastBand = null;
+    for (const f of todo) {
+      const band = f.sim === undefined ? null : Math.floor(f.sim * 10);
+      if (to !== undefined && band !== lastBand) {
+        lastBand = band;
+        const n = todo.filter(x => (x.sim === undefined ? null : Math.floor(x.sim * 10)) === band).length;
+        const label = band === null ? 'no embedding' : `similarity ${(band / 10).toFixed(1)}–${((band + 1) / 10).toFixed(1)}`;
+        groups.push(`<h4>${label} · ${n} <button onclick="selectBand(${band})">Select these</button></h4>`);
+      }
+      groups.push(figureHtml(f));
+    }
   }
   for (const f of named) {
     if (f.name !== lastName) {
@@ -698,12 +715,21 @@ async function loadFaces() {
   });
 }
 
+function selectBand(band) {
+  const ids = new Set(faces.filter(f => f.source !== 'manual' &&
+    (f.sim === undefined ? null : Math.floor(f.sim * 10)) === band).map(f => f.id));
+  document.querySelectorAll('#grid figure').forEach(el => {
+    if (ids.has(parseInt(el.dataset.id, 10))) el.classList.add('selected');
+  });
+  renderForgetRow();
+}
+
 function figureHtml(f) {
   return `
     <figure data-id="${f.id}">
       <button class="forget" title="Forget this face (delete it)" onclick="forget([${f.id}])">✕</button>
       <img src="${f.face_url}" loading="lazy" title="Click to select · ${escapeHtml(f.path)}" onclick="toggleSelect(this)" ondblclick="openViewer(${f.id})">
-      <figcaption title="${escapeHtml(f.path)}">${escapeHtml(f.filename)} · ${(f.det_score ?? 0).toFixed(2)}</figcaption>
+      <figcaption title="${escapeHtml(f.path)}${f.sim !== undefined ? ' · similarity ' + f.sim.toFixed(2) : ''}">${escapeHtml(f.filename)} · ${f.taken ? escapeHtml(f.taken.slice(0, 10)) : (f.det_score ?? 0).toFixed(2)}</figcaption>
       ${f.source === 'suggested' ? `<div class="sugg"><span>${escapeHtml(f.name)} (${(f.score ?? 0).toFixed(2)})?</span>
         <button title="Accept" onclick="judge([${f.id}], true)">✓</button>
         <button title="Reject" onclick="judge([${f.id}], false)">✗</button></div>` : ''}
@@ -875,7 +901,7 @@ def main_ark(args):
         print(f"(also on the LAN at http://{socket.gethostname()}:{args.port}/, no login)")
     if not args.no_open:
         Timer(0.6, lambda: webbrowser.open(url)).start()
-    uvicorn.run(make_ark_app(db_path, crop_dir), host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(make_ark_app(db_path, crop_dir, os.path.expanduser(args.catalog)), host=args.host, port=args.port, log_level="warning")
 
 
 def main():
@@ -890,6 +916,8 @@ def main():
     parser.add_argument("--db", default=DEFAULT_ANALYSIS_DB, help="analysis DB for --ark")
     parser.add_argument("--crops", default="~/.photo-organizer/face_crops",
                         help="face crop cache for --ark")
+    parser.add_argument("--catalog", default=DEFAULT_DB_PATH,
+                        help="organizer catalog, read for when photos were taken (--ark)")
     args = parser.parse_args()
     if args.ark:
         return main_ark(args)
