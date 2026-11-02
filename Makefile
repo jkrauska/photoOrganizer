@@ -37,7 +37,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
-.PHONY: help sync inventory run queue queue-photos set-date queue-list worker worker-bg stop verify status enrich faces browse test \
+.PHONY: help sync inventory run queue queue-photos set-date queue-list cameras cameras-stats worker worker-bg stop verify status enrich faces browse test \
 	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui
 
 help:
@@ -48,6 +48,7 @@ help:
 	@echo "make queue-photos [YEARS=\"2010 2011\"]   queue Apple Photos library years, oldest first (copy-only)"
 	@echo "make set-date SRC=/path DATE=YYYY-MM-DD   write that date into a folder's undated files (EXIF), then queue it"
 	@echo "make queue-list show the queue"
+	@echo "make cameras    record each stored file's camera + lens, read on the NAS (resumable); cameras-stats: per camera"
 	@echo "make worker     process the queue in order, then wait for more (worker-bg: in background)"
 	@echo "make stop       stop a running inventory/run/worker gracefully (in-flight files finish)"
 	@echo "make verify     re-read every stored file from the NAS and check its hash"
@@ -88,6 +89,12 @@ queue-photos: sync
 set-date: sync
 	@test -n "$(SRC)" -a -n "$(DATE)" || { echo 'usage: make set-date SRC=/path DATE=YYYY-MM-DD'; exit 2; }
 	@$(QUEUE) set-date "$(SRC)" "$(DATE)"
+
+cameras: sync
+	uv run photo-organizer-cameras --db "$(CATALOG)" run --dest "$(DEST)"
+
+cameras-stats: sync
+	@uv run photo-organizer-cameras --db "$(CATALOG)" stats
 
 queue-list: sync
 	@$(QUEUE) list
