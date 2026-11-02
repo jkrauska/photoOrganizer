@@ -24,6 +24,9 @@ def ts():
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
+FIRST_BATCH = 500
+
+
 def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit=0,
         verbose=False, confirm=lambda prompt: True, exif_workers=DEFAULT_EXIF_WORKERS,
         stop_file=DEFAULT_STOP_FILE, keep_sources=False, nas=True):
@@ -66,6 +69,7 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         totals = {'done': 0, 'duplicate_removed': 0, 'duplicate_kept': 0, 'source_kept': 0, 'error': 0, 'review': 0}
         processed = 0
         batch_num = 0
+        scan_size = min(FIRST_BATCH, batch_size)   # small first batch: files start moving within seconds
 
         while not shutdown_requested():
             batch_num += 1
@@ -86,7 +90,9 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
                 exhausted = False
             else:
                 print(f"\n[{ts()}] --- Batch {batch_num}: scanning ---")
-                batch_ids, exhausted = scan_batch(file_iter, conn, known, prior, want, verbose, exif_workers)
+                batch_ids, exhausted = scan_batch(file_iter, conn, known, prior, min(want, scan_size),
+                                                  verbose, exif_workers)
+                scan_size = min(scan_size * 4, batch_size)
                 if not batch_ids:
                     break
 

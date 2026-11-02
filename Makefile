@@ -3,6 +3,7 @@
 #   make run YES=1                      # no per-batch prompts (long unattended runs)
 #   make run SOURCES="/Volumes/Photowork/Image Archive"
 #   make queue SRC="/some/backup" KEEP=1   # copy-only: never delete originals (automatic for Time Machine)
+#   make queue SRC="/big/folder" SPLIT=1  # one queue item per subfolder, then the folder itself
 # SOURCES is comma-separated so paths may contain spaces.
 
 SOURCES ?= /Volumes/fileshares/photos,/Volumes/fileshares/photosCleanup2026,/Volumes/Photowork
@@ -40,6 +41,7 @@ help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
 	@echo "make run        move into DEST, verify, delete sources (LIMIT=n, YES=1 to skip prompts)"
 	@echo "make queue SRC=\"/path/a,/path/b\"   add folders to the live queue (any time)"
+	@echo "               SPLIT=1 queues each subfolder separately (large folders); KEEP=1 copy-only"
 	@echo "make set-date SRC=/path DATE=YYYY-MM-DD   write that date into a folder's undated files (EXIF), then queue it"
 	@echo "make queue-list show the queue"
 	@echo "make worker     process the queue in order, then wait for more (worker-bg: in background)"
@@ -71,7 +73,7 @@ run: sync | $(LOGDIR)
 
 queue: sync
 	@test -n "$(SRC)" || { echo 'usage: make queue SRC="/path/one,/path/two"'; exit 2; }
-	@IFS=',' read -ra src <<< "$(SRC)"; $(QUEUE) add $(if $(KEEP),--keep-sources) "$${src[@]}"
+	@IFS=',' read -ra src <<< "$(SRC)"; $(QUEUE) add $(if $(KEEP),--keep-sources) $(if $(SPLIT),--split) "$${src[@]}"
 
 set-date: sync
 	@test -n "$(SRC)" -a -n "$(DATE)" || { echo 'usage: make set-date SRC=/path DATE=YYYY-MM-DD'; exit 2; }

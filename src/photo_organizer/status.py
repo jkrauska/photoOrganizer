@@ -19,7 +19,7 @@ from photo_organizer.archive import PAGE as ARCHIVE_PAGE, archive_snapshot, mont
 from photo_organizer.db import DEFAULT_DB_PATH, init_db
 from photo_organizer.hashing import LARGE_FILE
 from photo_organizer.nas import same_server, smb_mounts
-from photo_organizer.work_queue import enqueue
+from photo_organizer.work_queue import enqueue, enqueue_split
 
 MOVED = "('done', 'duplicate_removed')"
 
@@ -237,6 +237,7 @@ svg { width:100%; height:90px; display:block; }
     <input id="qpath" list="qdirs" placeholder="/Volumes/Photowork/Masters — type a path; subfolders are suggested" spellcheck="false">
     <datalist id="qdirs"></datalist>
     <label class="s" title="Verify copies into the store but never delete the originals (always on for Time Machine backups)"><input type="checkbox" id="qkeep"> copy only (keep originals)</label>
+    <label class="s" title="Queue each subfolder as its own item, then the folder itself: for large folders"><input type="checkbox" id="qsplit"> split into subfolders</label>
     <button type="submit">Add to queue</button>
     <span id="qmsg" class="s"></span>
   </form>
@@ -395,7 +396,7 @@ $('qform').addEventListener('submit', async ev => {
   ev.preventDefault();
   const path = $('qpath').value.trim(); if (!path) return;
   const r = await (await fetch('/api/queue', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({path, keep_sources: $('qkeep').checked})})).json();
+    body: JSON.stringify({path, keep_sources: $('qkeep').checked, split: $('qsplit').checked})})).json();
   qmsg(r); if (r.ok) $('qpath').value = ''; tick();
 });
 tick(); setInterval(tick, 2000);
@@ -494,13 +495,17 @@ def make_handler(db_path, port):
                 length = min(int(self.headers.get('Content-Length', 0)), 65536)
                 payload = json.loads(self.rfile.read(length) or b'{}')
                 path, keep = payload.get('path', ''), bool(payload.get('keep_sources'))
+                split = bool(payload.get('split'))
             except (ValueError, AttributeError):
                 return self._send(400, {'ok': False, 'message': 'bad request'})
             if not isinstance(path, str) or not path.strip():
                 return self._send(400, {'ok': False, 'message': 'enter a folder path'})
             conn = init_db(db_path)
             try:
-                queued, message = enqueue(conn, path, _queue_dest(db_path), keep)
+                if split:
+                    queued, message = enqueue_split(conn, path, _queue_dest(db_path), keep)
+                else:
+                    queued, message = enqueue(conn, path, _queue_dest(db_path), keep)
             finally:
                 conn.close()
             return self._send(200 if queued else 400, {'ok': bool(queued), 'message': message})

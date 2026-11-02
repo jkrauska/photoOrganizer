@@ -129,14 +129,21 @@ def _resolve_date(filepath, source_root, exif_hit, prior):
     return None, None, 'mtime', None
 
 
-def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False, exif_workers=DEFAULT_EXIF_WORKERS):
-    """Catalog about `limit` new media/sidecar files from file_iter, always ending at a folder boundary
-    so a photo and its sidecars are never split across batches.
+BATCH_BYTES = 50 << 30      # a batch also ends after this much data, so huge videos don't make hours-long batches
+
+
+def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False, exif_workers=DEFAULT_EXIF_WORKERS,
+               max_bytes=BATCH_BYTES):
+    """Catalog about `limit` new media/sidecar files (or `max_bytes` of them) from file_iter, ending at a
+    folder boundary so a photo and its sidecars are never split across batches. A folder holding more
+    than twice `limit` files is split between photos instead (sidecars share their photo's stem and
+    sort next to it).
 
     Unhandled file types are recorded as 'ignored' (left in place) and don't count toward the limit.
     Returns (inserted_ids, exhausted).
     """
     batch = []
+    batch_bytes = 0
     ignored = 0
     exhausted = True
     set_progress(conn, phase='scanning', scanned_in_batch=0)
@@ -144,7 +151,9 @@ def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False, exif_w
         if (len(batch) + ignored) % 500 == 499:
             set_progress(conn, scanned_in_batch=len(batch) + ignored, current_dir=item[1])
         root, dirpath, fname = item
-        if batch and (len(batch) >= limit or shutdown_requested()) and dirpath != batch[-1][1]:
+        if batch and (len(batch) >= limit or batch_bytes >= max_bytes or shutdown_requested()) and (
+                dirpath != batch[-1][1] or (len(batch) >= 2 * limit and
+                                            compute_group_key(dirpath, fname) != compute_group_key(dirpath, batch[-1][2]))):
             file_iter.push_back(item)
             exhausted = False
             break
@@ -170,6 +179,7 @@ def scan_batch(file_iter, conn, known_paths, prior, limit, verbose=False, exif_w
             continue
 
         batch.append((root, dirpath, fname, filepath, ext, st.st_size, mtime))
+        batch_bytes += st.st_size
 
     set_progress(conn, phase='reading dates', scanned_in_batch=len(batch) + ignored,
                  dates_read=0, dates_total=0)

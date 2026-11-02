@@ -86,9 +86,36 @@ def set_folder_date(conn, folder, day):
     return dated, failed
 
 
-def add(conn, paths, dest=None, keep_sources=False):
+def enqueue_split(conn, path, dest=None, keep_sources=False):
+    """Queue each immediate subfolder of path as its own item, then path itself (for files at its
+    top level and the final prune; by then the subfolders' files are moved or cataloged). Each part
+    shows its own progress and result, and a stop or failure affects only that part.
+    Returns (queued_paths, message)."""
+    from photo_organizer.scanner import should_skip_dir
+    top = os.path.abspath(os.path.expanduser(path.strip())).rstrip('/') or '/'
+    if not os.path.isdir(top):
+        return [], f"not a folder: {top}"
+    subdirs = sorted(e.path for e in os.scandir(top)
+                     if e.is_dir(follow_symlinks=False) and not should_skip_dir(e.name)
+                     and not e.name.startswith('.'))
+    queued, problems = [], []
+    for p in [*subdirs, top]:
+        src, msg = enqueue(conn, p, dest, keep_sources)
+        (queued if src else problems).append(src or msg)
+    message = f"queued {len(queued) - (top in queued):,} subfolders" + (" + the top folder" if top in queued else "")
+    if problems:
+        message += f"; skipped {len(problems)}: " + '; '.join(problems[:3])
+    return queued, message
+
+
+def add(conn, paths, dest=None, keep_sources=False, split=False):
     added = []
     for p in paths:
+        if split:
+            srcs, msg = enqueue_split(conn, p, dest, keep_sources)
+            print(f"  {msg}")
+            added += srcs
+            continue
         src, msg = enqueue(conn, p, dest, keep_sources)
         print(f"  {msg}")
         if src:
@@ -238,6 +265,8 @@ def main():
     p_add.add_argument('paths', nargs='+')
     p_add.add_argument('--keep-sources', action='store_true',
                        help='Copy-only: never delete the originals (always on for Time Machine backups)')
+    p_add.add_argument('--split', action='store_true',
+                       help='Queue each subfolder as its own item, then the folder itself (for large folders)')
     sub.add_parser('list')
     p_date = sub.add_parser('set-date', help="Write a capture date into a folder's undated files' EXIF, then queue it")
     p_date.add_argument('path')
@@ -256,7 +285,7 @@ def main():
 
     conn = init_db(args.db)
     if args.cmd == 'add':
-        add(conn, args.paths, keep_sources=args.keep_sources)
+        add(conn, args.paths, keep_sources=args.keep_sources, split=args.split)
         list_queue(conn)
     elif args.cmd == 'set-date':
         dated, failed = set_folder_date(conn, args.path, args.date)
