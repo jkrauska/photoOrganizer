@@ -10,6 +10,7 @@ and cached crops are deleted. Kept free of FastAPI so it can be tested without t
 import io
 import os
 import re
+import time
 import sqlite3
 from pathlib import Path
 
@@ -26,6 +27,7 @@ FULL_MAX_SIDE = 2048
 # matches scored 0.6-0.7 while sisters' clusters reached 0.49 against each other.
 GUESS_MIN = 0.55
 GUESS_MARGIN = 0.15
+LATEST_MAX_AGE = 60     # seconds a cluster's newest photo date may lag behind new faces
 BURST_IOU = 0.5         # face boxes overlapping this much in photos of the same second: one shot
 
 
@@ -36,8 +38,15 @@ def connect(db_path):
 
 
 def ensure_db(db_path):
-    """Create the schema if needed (ark.open_db), so later per-request connections can skip it."""
-    open_db(db_path).close()
+    """Create the schema if needed (ark.open_db), so later per-request connections can skip it,
+    plus an index covering the cluster list's columns, so it never reads the embeddings."""
+    conn = open_db(db_path)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_cluster_cover "
+                     "ON faces(cluster_id, det_score, person_source, person_id, sha256, id)")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _cluster_where(cid):
@@ -60,19 +69,54 @@ def _cluster_name(conn, cid):
     return (row['id'], row['name']) if row else (None, '')
 
 
+_latest_cache = {}
+
+
+def _cluster_latest(conn):
+    """{cluster_id: newest photo date 'YYYY-MM-DD' among its faces} from the store's date folders.
+    It reads every face, so it is cached until faces are added, forgotten or re-clustered, and
+    while a face pass keeps adding faces it is redone at most once a minute."""
+    stamp = tuple(conn.execute("SELECT COUNT(*), MAX(id), TOTAL(cluster_id) FROM faces").fetchone())
+    db = conn.execute("PRAGMA database_list").fetchone()[2]
+    hit = _latest_cache.get(db)
+    if hit and (hit[0] == stamp or time.monotonic() - hit[2] < LATEST_MAX_AGE):
+        return hit[1]
+    day = {}
+    for sha, path in conn.execute("SELECT sha256, path FROM images WHERE faces_at IS NOT NULL"):
+        m = _DAY.search(path or '')
+        day[sha] = m.group(1) if m else ''
+    latest = {}
+    for cid, sha in conn.execute("SELECT cluster_id, sha256 FROM faces"):
+        d = day.get(sha, '')
+        if d > latest.get(cid, ''):
+            latest[cid] = d
+    _latest_cache[db] = (stamp, latest, time.monotonic())
+    return latest
+
+
 def list_clusters(conn):
     """Clusters biggest first, then 'unclustered' last."""
     rows = conn.execute(
         "SELECT cluster_id, COUNT(*) n, SUM(person_source = 'manual') named, "
         "SUM(person_source = 'suggested') suggested, "
-        "(SELECT id FROM faces g WHERE g.cluster_id IS f.cluster_id ORDER BY det_score DESC LIMIT 1) sample "
+        "id sample, MAX(det_score) "        # SQLite: a bare column comes from the MAX() row
         "FROM faces f GROUP BY cluster_id").fetchall()
     items, tail = [], None
+    latest = _cluster_latest(conn)
+    # Each cluster's name (see _cluster_name) from one grouped query, not two per cluster.
+    names = dict(conn.execute("SELECT id, name FROM persons").fetchall())
+    top = {}
+    for cid, pid, n in conn.execute("SELECT cluster_id, person_id, COUNT(*) FROM faces "
+                                    "WHERE person_source = 'manual' AND cluster_id IS NOT NULL "
+                                    "GROUP BY cluster_id, person_id"):
+        if n > top.get(cid, (None, 0))[1]:
+            top[cid] = (pid, n)
     for r in rows:
         cid = UNCLUSTERED if r['cluster_id'] is None else f"c{r['cluster_id']}"
         entry = {'id': cid, 'count': r['n'], 'named': r['named'] or 0, 'suggested': r['suggested'] or 0,
-                 'label': '' if cid == UNCLUSTERED else _cluster_name(conn, cid)[1],
-                 'sample': f"face/{r['sample']}.jpg"}
+                 'label': '' if cid == UNCLUSTERED or top.get(r['cluster_id'], (0, 0))[1] * 2 <= r['n']
+                 else names[top[r['cluster_id']][0]],
+                 'sample': f"face/{r['sample']}.jpg", 'latest': latest.get(r['cluster_id'], '')}
         if cid == UNCLUSTERED:
             tail = entry
         else:

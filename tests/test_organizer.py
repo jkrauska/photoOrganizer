@@ -1027,6 +1027,9 @@ def test_ark_faces_cluster_detail_bands_unnamed_faces_by_similarity_in_shooting_
     # Without a catalog the store's date folders and filenames decide within a band.
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0')][:4] == [5, 4, 7, 6]
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0', limit=2)] == [5, 4]
+    conn.execute("UPDATE images SET faces_at = 'x', path = '/s/2021/03/2021-03-04/v.jpg' WHERE sha256 = 's7'")
+    conn.execute("UPDATE images SET faces_at = 'x' WHERE sha256 != 's7'")
+    assert ark_faces.list_clusters(conn)[0]['latest'] == '2021-03-04', "the newest photo's date folder"
 
 
 def test_ark_faces_cluster_detail_shows_a_burst_of_the_same_second_once(tmp_path):

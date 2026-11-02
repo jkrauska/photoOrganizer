@@ -568,6 +568,7 @@ ARK_HTML = r"""<!doctype html>
       <option value="name">Name A–Z</option>
       <option value="suggested">Most suggestions</option>
       <option value="fewest">Fewest faces</option>
+      <option value="recent">Most recent photo</option>
     </select>
   </div>
   <div id="list"><div class="empty">Loading…</div></div>
@@ -587,6 +588,7 @@ const SORTS = {
   named: (a, b) => (!!b.label - !!a.label) || b.count - a.count,
   name: (a, b) => (!!b.label - !!a.label) || a.label.localeCompare(b.label) || b.count - a.count,
   suggested: (a, b) => b.suggested - a.suggested || b.count - a.count,
+  recent: (a, b) => (b.latest || '').localeCompare(a.latest || '') || b.count - a.count,
 };
 
 function sortedClusters() {
@@ -637,7 +639,7 @@ function renderSidebar() {
         <img src="${c.sample}" loading="lazy">
         <div class="meta">
           <div class="label ${c.label?'':'unlabeled'}">${c.id==='unclustered' ? 'Unclustered faces' : (escapeHtml(c.label) || '(unnamed) ' + c.id)}</div>
-          <div class="count">${c.count} face${c.count===1?'':'s'}${c.named?' · '+c.named+' named':''}${c.suggested?' · '+c.suggested+' suggested':''}</div>
+          <div class="count">${c.count} face${c.count===1?'':'s'}${c.named?' · '+c.named+' named':''}${c.suggested?' · '+c.suggested+' suggested':''}${sortBy==='recent' && c.latest ? ' · newest '+c.latest : ''}</div>
         </div>
       </div>`).join('');
 }
