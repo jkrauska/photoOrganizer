@@ -55,6 +55,8 @@ def test_shuffle_serves_random_stored_photos_with_captions_and_keeps_scores(tmp_
     assert client.get('/api/photo/h1').json()['score'] == 4
     assert client.post('/api/score', json={'sha': 'h1', 'score': None}).status_code == 200    # 0 clears it
     assert client.get('/api/photo/h1').json()['score'] is None
+    assert client.post('/api/score', json={'sha': 'h1', 'score': 1}).status_code == 200
+    assert client.get('/api/random').status_code == 503      # the only photo is one-star
 
 
 def test_shuffle_picks_the_day_first_so_bursts_dont_crowd_out_other_days(tmp_path):
@@ -75,3 +77,6 @@ def test_shuffle_picks_the_day_first_so_bursts_dont_crowd_out_other_days(tmp_pat
     picks = [random_photo(conn, days, rng)[0] for _ in range(400)]
     assert 150 < picks.count('s1') < 250              # half the picks, not 1 in 201
     assert 's2' not in picks
+    skip = {'s1'} | {f'b{i}' for i in range(199)}          # one-star photos
+    picks = {random_photo(conn, days, rng, skip) for _ in range(50)}
+    assert picks == {('b199', f'{burst}/0199.jpg', None), None}

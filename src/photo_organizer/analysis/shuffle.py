@@ -4,10 +4,10 @@ Run:   make ark-shuffle-ui   (or: uv run photo-shuffle)
 Then:  http://127.0.0.1:8080/
 
 A random day folder, then a random stored photo in it (catalog files with status 'done', no
-videos), fades in with a slow pan/zoom.
-Space plays/pauses, ← → step back through the history and forward, 1–5 score the photo on screen
-and move on to the next one, 0 clears its score, + / - change the pace, F goes full screen. The
-bottom overlay shows when the photo was taken and Gemma's caption from analysis.db when there is one.
+videos), fades in with a slow pan/zoom. Space plays/pauses, ← → step back through the history and
+forward, 1–5 score the photo on screen and move on to the next one, 0 clears its score, + / -
+change the pace, F goes full screen. One-star photos are never shown again. The bottom overlay
+shows when the photo was taken and Gemma's caption from analysis.db when there is one.
 
 Scores are kept in analysis.db, table photo_scores (one row per sha256; a new score replaces the
 old one), e.g. the photos to clean out:
@@ -42,6 +42,7 @@ PHOTO_SIDE = 2048
 DEFAULT_CATALOG = '~/.photo-organizer/catalog.db'
 DEFAULT_CACHE = '~/.photo-organizer/shuffle-cache'
 DAYS_REFRESH = 600              # seconds between rescans of the catalog's day folders
+HIDE_SCORE = 1                  # photos scored this or lower aren't shown
 RECENT_DAYS = 300               # don't revisit one of the last this many days shown
 
 SCORES_SCHEMA = """
@@ -87,15 +88,15 @@ def photo_days(catalog):
         "SELECT dest_path FROM files WHERE status = 'done' AND sha256 IS NOT NULL") if _is_photo(path)})
 
 
-def random_photo(catalog, days, rng=random):
+def random_photo(catalog, days, rng=random, skip=frozenset()):
     """(sha256, dest_path, taken_at) of a random stored photo in a random one of the day folders,
     or None. Picking the day first means a day of a thousand burst shots comes up no more often
-    than a day with a single photo."""
+    than a day with a single photo. Photos whose sha256 is in skip are never picked."""
     day = rng.choice(days)
     rows = [r for r in catalog.execute(
         "SELECT sha256, dest_path, taken_at FROM files WHERE dest_path >= ? AND dest_path < ? "
         "AND status = 'done' AND sha256 IS NOT NULL", (day + '/', day + '0'))   # '0' sorts right after '/'
-        if os.path.dirname(r['dest_path']) == day and _is_photo(r['dest_path'])]
+        if os.path.dirname(r['dest_path']) == day and _is_photo(r['dest_path']) and r['sha256'] not in skip]
     if not rows:
         return None
     r = rng.choice(rows)
@@ -158,8 +159,10 @@ def make_app(catalog_path, analysis_path, cache_dir, rng=random):
             if not folders:
                 raise HTTPException(404, "no stored photos in the catalog")
             fresh = len(folders) > 2 * len(recent)
+            hidden = {r[0] for r in analysis.execute(       # one star: never shown again
+                "SELECT sha256 FROM photo_scores WHERE score <= ?", (HIDE_SCORE,))}
             for _ in range(20):         # skip catalog rows whose file isn't there (store offline, moved)
-                hit = random_photo(catalog, folders, rng)
+                hit = random_photo(catalog, folders, rng, hidden)
                 if hit is None:
                     continue
                 sha, path, taken_at = hit
@@ -358,11 +361,15 @@ async function step(by, auto) {
   busy = true;
   const was = history[at];
   try {
+    // One-star photos are never shown again, so stepping through the history skips them.
+    const ok = i => history[i] && history[i].score !== 1;
+    let i = at + by;
+    while (history[i] && !ok(i)) i += by;
     if (by < 0) {
-      if (at <= 0) { status('Start of history'); return; }
-      at--;
-    } else if (at < history.length - 1) {
-      at++;
+      if (i < 0) { status('Start of history'); return; }
+      at = i;
+    } else if (i < history.length) {
+      at = i;
     } else {
       let p = ahead.shift();
       if (!p) { status('Loading…', true); p = await fetchRandom(); }
