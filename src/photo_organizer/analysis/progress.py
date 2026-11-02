@@ -10,6 +10,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from collections import Counter
 
 from photo_organizer.analysis.ark import DEFAULT_ANALYSIS_DB
 from photo_organizer.constants import PHOTO_EXTENSIONS
@@ -25,7 +26,8 @@ _store_cache = {}
 
 
 def _store_counts(catalog_path, ttl=120):
-    """(photos, day folders) in the store, one per content hash; cached, it reads every row."""
+    """(photos, day folders with at least 2 photos — the ones the day run summarizes) in the store,
+    one per content hash; cached, it reads every row."""
     hit = _store_cache.get(catalog_path)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
@@ -35,12 +37,12 @@ def _store_counts(catalog_path, ttl=120):
                            "AND sha256 IS NOT NULL AND dest_path IS NOT NULL").fetchall()
     finally:
         cat.close()
-    seen, days = set(), set()
+    seen, days = set(), Counter()
     for sha, path in rows:
         if os.path.splitext(path)[1].lower() in PHOTO_EXTENSIONS and sha not in seen:
             seen.add(sha)
-            days.add(os.path.dirname(path))
-    counts = (len(seen), len(days))
+            days[os.path.dirname(path)] += 1
+    counts = (len(seen), sum(1 for n in days.values() if n >= 2))
     _store_cache[catalog_path] = (time.time(), counts)
     return counts
 

@@ -1171,7 +1171,8 @@ def test_analysis_progress_reads_counts_and_the_newest_logs(tmp_path):
     cat_db = str(tmp_path / 'catalog.db')
     cat = init_db(cat_db)
     for i, p in enumerate(['/s/2010/01/2010-01-01/a.jpg', '/s/2010/01/2010-01-01/b.jpg',
-                           '/s/2011/02/2011-02-02/c.jpg', '/s/2011/02/2011-02-02/v.mov']):
+                           '/s/2011/02/2011-02-02/c.jpg', '/s/2011/02/2011-02-02/v.mov',
+                           '/s/2011/02/2011-02-02/d.jpg', '/s/2012/03/2012-03-03/e.jpg']):
         cat.execute("INSERT INTO files (original_path, filename, file_size, status, sha256, dest_path) "
                     "VALUES (?, ?, 1, 'done', ?, ?)", (f'/src/{i}', os.path.basename(p), f'h{i}', p))
     cat.commit()
@@ -1191,7 +1192,7 @@ def test_analysis_progress_reads_counts_and_the_newest_logs(tmp_path):
                                          "[5, 9 left] 2011-02-02  3 photos, 1 bursts, 3 sampled  50s  (0.2 h left)\n")
     s = progress.snapshot(cat_db, adb, str(logs), running={'faces': True, 'days': False})
     f, d = s['faces'], s['days']
-    assert (f['images_done'], f['images_total']) == (1, 3)
+    assert (f['images_done'], f['images_total']) == (1, 5)
     assert f['job']['running'] and (f['job']['done'], f['job']['todo'], f['job']['eta_s']) == (7, 50, 180)
-    assert (d['summarized'], d['days_total'], d['latest'][0]['title']) == (1, 2, 'New Year')
+    assert (d['summarized'], d['days_total'], d['latest'][0]['title']) == (1, 2, 'New Year')   # one-photo day left out
     assert not d['job']['running'] and (d['job']['done'], d['job']['left'], d['job']['last_day']) == (5, 9, '2011-02-02')
