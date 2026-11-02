@@ -25,7 +25,7 @@ SKIP_DIR_SUFFIXES = ('.photoslibrary', '.cocatalog', '.cosessiondb', '.lrdata', 
                      '.aplibrary', '.migratedphotolibrary')
 
 # Date sources trusted enough to file a photo; anything else is left in place for review.
-TRUSTED_DATE_SOURCES = ('exif', 'filename', 'dirname')
+TRUSTED_DATE_SOURCES = ('photos', 'exif', 'filename', 'dirname')   # 'photos': the Apple Photos library's date
 
 # Filename date patterns (order matters - most specific first)
 FILENAME_PATTERNS = [

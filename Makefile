@@ -4,6 +4,7 @@
 #   make run SOURCES="/Volumes/Photowork/Image Archive"
 #   make queue SRC="/some/backup" KEEP=1   # copy-only: never delete originals (automatic for Time Machine)
 #   make queue SRC="/big/folder" SPLIT=1  # one queue item per subfolder, then the folder itself
+#   make queue-photos YEARS="2010 2011"    # Apple Photos library years, copy-only (default: all, oldest first)
 # SOURCES is comma-separated so paths may contain spaces.
 
 SOURCES ?= /Volumes/fileshares/photos,/Volumes/fileshares/photosCleanup2026,/Volumes/Photowork
@@ -36,7 +37,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
-.PHONY: help sync inventory run queue set-date queue-list worker worker-bg stop verify status enrich faces browse test \
+.PHONY: help sync inventory run queue queue-photos set-date queue-list worker worker-bg stop verify status enrich faces browse test \
 	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui
 
 help:
@@ -44,6 +45,7 @@ help:
 	@echo "make run        move into DEST, verify, delete sources (LIMIT=n, YES=1 to skip prompts)"
 	@echo "make queue SRC=\"/path/a,/path/b\"   add folders to the live queue (any time)"
 	@echo "               SPLIT=1 queues each subfolder separately (large folders); KEEP=1 copy-only"
+	@echo "make queue-photos [YEARS=\"2010 2011\"]   queue Apple Photos library years, oldest first (copy-only)"
 	@echo "make set-date SRC=/path DATE=YYYY-MM-DD   write that date into a folder's undated files (EXIF), then queue it"
 	@echo "make queue-list show the queue"
 	@echo "make worker     process the queue in order, then wait for more (worker-bg: in background)"
@@ -65,7 +67,7 @@ help:
 	@echo "DEST=$(DEST)  CATALOG=$(CATALOG)  LIMIT=$(LIMIT)"
 
 sync:
-	@uv sync --quiet
+	@uv sync --quiet --inexact   # keeps the analysis extra the ark-* targets install
 
 $(LOGDIR):
 	@mkdir -p "$(LOGDIR)"
@@ -79,6 +81,9 @@ run: sync | $(LOGDIR)
 queue: sync
 	@test -n "$(SRC)" || { echo 'usage: make queue SRC="/path/one,/path/two"'; exit 2; }
 	@IFS=',' read -ra src <<< "$(SRC)"; $(QUEUE) add $(if $(KEEP),--keep-sources) $(if $(SPLIT),--split) "$${src[@]}"
+
+queue-photos: sync
+	@$(QUEUE) photos $(YEARS)
 
 set-date: sync
 	@test -n "$(SRC)" -a -n "$(DATE)" || { echo 'usage: make set-date SRC=/path DATE=YYYY-MM-DD'; exit 2; }

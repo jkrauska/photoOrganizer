@@ -1438,6 +1438,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "humanize" },
+    { name = "osxphotos" },
 ]
 
 [package.optional-dependencies]
@@ -1449,7 +1450,6 @@ analysis = [
     { name = "mlx-vlm" },
     { name = "onnxruntime" },
     { name = "opencv-python" },
-    { name = "osxphotos" },
     { name = "pillow-heif" },
     { name = "scikit-learn" },
     { name = "uvicorn" },
@@ -1472,7 +1472,7 @@ requires-dist = [
     { name = "mlx-vlm", marker = "extra == 'analysis'", specifier = ">=0.5" },
     { name = "onnxruntime", marker = "extra == 'analysis'", specifier = ">=1.17" },
     { name = "opencv-python", marker = "extra == 'analysis'" },
-    { name = "osxphotos", marker = "extra == 'analysis'" },
+    { name = "osxphotos", specifier = ">=0.77" },
     { name = "pillow-heif", marker = "extra == 'analysis'", specifier = ">=1.3.0" },
     { name = "scikit-learn", marker = "extra == 'analysis'", specifier = ">=1.8.0" },
     { name = "uvicorn", marker = "extra == 'analysis'" },

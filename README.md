@@ -58,6 +58,24 @@ A destination folder written by an older run (e.g. `photosCleanup2026`) can be u
 source. Its `photo_organizer.db` is read to recover each file's original path and to send
 files that run dated only by mtime to `review` instead of trusting their folder.
 
+### Apple Photos library
+
+The local Photos library is imported a year at a time as queue items named `photos:YYYY`,
+always copy-only: nothing in the library is written or deleted.
+
+```bash
+make queue-photos                    # every year in the library, oldest first
+make queue-photos YEARS="2010 2016"  # just these years (or type photos:2016 in the status page)
+```
+
+Each asset files its original byte for byte under its real name, dated by Photos (including
+date fixes made there). It also files the RAW of a RAW+JPEG pair, the Live Photo video
+(`IMG_1234.MOV`), the current edit (`IMG_1234_edited.HEIC`) and an XMP sidecar
+(`IMG_1234.HEIC.xmp`: title, caption, keywords, people, GPS). Content already in the store is
+not copied again, and its sidecar goes next to the stored copy. Assets only in iCloud are
+left for review and retried when the year is queued again. Rows keep the Photos ID in
+`photos_uuid`. Re-running a year copies only assets added since.
+
 ### Dates
 
 1. ExifTool: `SubSecDateTimeOriginal`, `DateTimeOriginal`, `CreateDate`, `MediaCreateDate`

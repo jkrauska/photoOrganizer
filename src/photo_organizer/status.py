@@ -19,7 +19,7 @@ from photo_organizer.archive import PAGE as ARCHIVE_PAGE, archive_snapshot, mont
 from photo_organizer.db import DEFAULT_DB_PATH, init_db
 from photo_organizer.hashing import LARGE_FILE
 from photo_organizer.nas import same_server, smb_mounts
-from photo_organizer.work_queue import enqueue, enqueue_split
+from photo_organizer.work_queue import enqueue, enqueue_photos, enqueue_split
 
 MOVED = "('done', 'duplicate_removed')"
 
@@ -153,7 +153,7 @@ def snapshot(db_path):
             if q['status'] == 'running' and run.get('alive') and run.get('transfer'):
                 q['transfer'] = run['transfer']
             elif q['status'] == 'queued' and run.get('dest'):
-                host = _expected_server(q['source'], run['dest'])
+                host = None if q['source'].startswith('photos:') else _expected_server(q['source'], run['dest'])
                 q['transfer_expected'] = f"NAS {host}" if host else 'Mac'
         return {
             'worker': worker, 'queue': queue,
@@ -234,11 +234,12 @@ svg { width:100%; height:90px; display:block; }
 <div class="card" id="largecard" style="margin-bottom:12px;display:none"><h2>Large files in flight</h2><div id="large"></div></div>
 <div class="card" style="margin-bottom:12px"><h2>Queue <span id="worker" class="s" style="text-transform:none;letter-spacing:0"></span></h2>
   <form id="qform" class="qform" autocomplete="off">
-    <input id="qpath" list="qdirs" placeholder="/Volumes/Photowork/Masters — type a path; subfolders are suggested" spellcheck="false">
+    <input id="qpath" list="qdirs" placeholder="/Volumes/Photowork/Masters — type a path (or photos:2016); subfolders are suggested" spellcheck="false">
     <datalist id="qdirs"></datalist>
     <label class="s" title="Verify copies into the store but never delete the originals (always on for Time Machine backups)"><input type="checkbox" id="qkeep"> copy only (keep originals)</label>
     <label class="s" title="Queue each subfolder as its own item, then the folder itself: for large folders"><input type="checkbox" id="qsplit"> split into subfolders</label>
     <button type="submit">Add to queue</button>
+    <button type="button" id="qphotos" title="Queue every year of the Apple Photos library, oldest first, copy-only (the library is never changed). One year: type photos:2016">Queue Apple Photos years</button>
     <span id="qmsg" class="s"></span>
   </form>
   <table id="queue"></table></div>
@@ -399,6 +400,12 @@ $('qform').addEventListener('submit', async ev => {
     body: JSON.stringify({path, keep_sources: $('qkeep').checked, split: $('qsplit').checked})})).json();
   qmsg(r); if (r.ok) $('qpath').value = ''; tick();
 });
+$('qphotos').onclick = async () => {
+  $('qmsg').textContent = 'reading the Photos library…';
+  const r = await (await fetch('/api/queue', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({photos: true})})).json();
+  qmsg(r); tick();
+};
 tick(); setInterval(tick, 2000);
 </script></body></html>
 """
@@ -496,8 +503,18 @@ def make_handler(db_path, port):
                 payload = json.loads(self.rfile.read(length) or b'{}')
                 path, keep = payload.get('path', ''), bool(payload.get('keep_sources'))
                 split = bool(payload.get('split'))
+                photos = bool(payload.get('photos'))
             except (ValueError, AttributeError):
                 return self._send(400, {'ok': False, 'message': 'bad request'})
+            if photos:
+                conn = init_db(db_path)
+                try:
+                    queued, message = enqueue_photos(conn)
+                except Exception as e:      # library unreadable (permissions, osxphotos version)
+                    queued, message = [], f"can't read the Apple Photos library: {e}"
+                finally:
+                    conn.close()
+                return self._send(200 if queued else 400, {'ok': bool(queued), 'message': message})
             if not isinstance(path, str) or not path.strip():
                 return self._send(400, {'ok': False, 'message': 'enter a folder path'})
             conn = init_db(db_path)

@@ -17,6 +17,7 @@ from photo_organizer.report import print_report
 from photo_organizer.scanner import PriorCatalogs, is_within, iter_source_files, scan_batch
 from photo_organizer.state import DEFAULT_STOP_FILE, configure_stop_file, shutdown_requested, signal_handler
 from photo_organizer.nas import detect as detect_nas
+from photo_organizer.photos_library import catalog_year, is_photos_source, open_library, place_sidecars
 from photo_organizer.transfer import execute_transfers, recover_interrupted, retry_source_removal
 
 
@@ -32,8 +33,10 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         stop_file=DEFAULT_STOP_FILE, keep_sources=False, nas=True):
     """Scan sources, file trusted-date media into dest, delete verified sources. Returns totals,
     with 'stopped' set when a stop was requested. Raises RunLocked if another run holds the catalog."""
-    # Backups are imported copy-only, whatever was asked.
-    keep_sources = keep_sources or any(is_time_machine_path(s) for s in sources)
+    # Backups and the Apple Photos library are imported copy-only, whatever was asked.
+    photos = [s for s in sources if is_photos_source(s)]
+    folders = [s for s in sources if not is_photos_source(s)]
+    keep_sources = keep_sources or bool(photos) or any(is_time_machine_path(s) for s in sources)
     lock_fd = acquire_run_lock(db_path)
     configure_stop_file(stop_file)
     conn = init_db(db_path)
@@ -52,7 +55,9 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
         transfer = None
         if execute:
             note = None
-            if nas:
+            if photos:
+                note = 'from the Apple Photos library'
+            elif nas:
                 fs, note = detect_nas(sources, dest)
             if fs:
                 transfer = 'NAS ' + fs.target.split('@')[-1]
@@ -64,10 +69,21 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
             set_progress(conn, transfer=transfer)
 
         known = {r[0] for r in conn.execute("SELECT original_path FROM files")}
-        file_iter = iter_source_files(sources, dest, known)
+        processed = 0
+        file_iter = iter_source_files(folders, dest, known)
         prior = PriorCatalogs()
         totals = {'done': 0, 'duplicate_removed': 0, 'duplicate_kept': 0, 'source_kept': 0, 'error': 0, 'review': 0}
-        processed = 0
+        if photos:
+            set_progress(conn, phase='reading the Apple Photos library')
+            library = open_library()
+            for source in photos:
+                ids, icloud = catalog_year(conn, source, library)
+                totals['review'] += icloud
+                print(f"{source}: {len(ids):,} new files cataloged"
+                      + (f", {icloud:,} assets only in iCloud (left for review)" if icloud else ""))
+                if not execute and ids:     # a dry run plans here; executes plan per pending batch below
+                    totals['review'] += plan_destinations(conn, dest, ids, verbose)[1]
+                    processed += len(ids)
         batch_num = 0
         scan_size = min(FIRST_BATCH, batch_size)   # small first batch: files start moving within seconds
 
@@ -113,6 +129,8 @@ def run(sources, dest, db_path, execute=False, batch_size=5000, workers=4, limit
                     print("Aborted.")
                     break
                 counts = execute_transfers(conn, batch_ids, workers, verbose, keep_sources, fs)
+                if photos:
+                    place_sidecars(conn, batch_ids)
                 for k, v in counts.items():
                     totals[k] += v
                 if keep_sources:
@@ -160,7 +178,8 @@ def main():
                     "unhandled types, and errors are left where they are."
     )
     parser.add_argument('--source', action='append', required=True,
-                        help='Source directory to empty into the store (repeatable)')
+                        help='Source directory to empty into the store (repeatable), or photos:YYYY for that '
+                             "year of the Apple Photos library (copy-only)")
     parser.add_argument('--dest', required=True, help='Canonical store root (the fresh mount)')
     parser.add_argument('--db', default=DEFAULT_DB_PATH,
                         help=f'Catalog path on local disk (default: {DEFAULT_DB_PATH})')
@@ -183,18 +202,18 @@ def main():
     args = parser.parse_args()
 
     require_exiftool()
-    for d in args.source + [args.dest]:
+    for d in [s for s in args.source if not is_photos_source(s)] + [args.dest]:
         if not os.path.isdir(d):
             sys.exit(f"Error: directory not found: {d}")
-    sources = [os.path.abspath(s) for s in args.source]
+    sources = [s if is_photos_source(s) else os.path.abspath(s) for s in args.source]
     dest = os.path.abspath(args.dest)
     for s in sources:
-        if is_within(s, dest):
+        if not is_photos_source(s) and is_within(s, dest):
             sys.exit(f"Error: source {s} is inside the destination")
     if any(is_within(os.path.abspath(args.db), s) for s in sources):
         sys.exit("Error: the catalog must not live inside a source directory")
 
-    keep = args.keep_sources or any(is_time_machine_path(s) for s in sources)
+    keep = args.keep_sources or any(is_time_machine_path(s) or is_photos_source(s) for s in sources)
     mode = ('EXECUTE: copy-only, sources kept' if keep else 'EXECUTE: sources are DELETED after verified copy')
     print(f"Photo Organizer [{mode if args.execute else 'DRY RUN'}]")
     for s in sources:

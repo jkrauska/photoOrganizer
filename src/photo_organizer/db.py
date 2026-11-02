@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS files (
     dest_path TEXT,
     sha256 TEXT,
     quick_hash TEXT,
+    photos_uuid TEXT,
     taken_at TEXT,
     exif_creation_date TEXT,
     file_modified_date TEXT,
@@ -53,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_dest_path ON files(dest_path);
 CREATE INDEX IF NOT EXISTS idx_updated_at ON files(updated_at);
 CREATE INDEX IF NOT EXISTS idx_created_at ON files(created_at);
 CREATE INDEX IF NOT EXISTS idx_file_size ON files(file_size);
+CREATE INDEX IF NOT EXISTS idx_photos_uuid ON files(photos_uuid);
 
 -- 'run' and 'worker' rows holding live state and heartbeats as JSON, read by the status page.
 CREATE TABLE IF NOT EXISTS progress (key TEXT PRIMARY KEY, value TEXT);
@@ -70,9 +72,10 @@ CREATE TABLE IF NOT EXISTS queue (
 );
 """
 
+# photos_uuid: the Apple Photos asset a row was copied from (photos_library.py).
 # quick_hash: SHA256 of size + three 1 MB samples (hashing.quick_hash); rules out duplicates cheaply.
 ADDED_COLUMNS = {'source_root': 'TEXT', 'origin_path': 'TEXT', 'taken_at': 'TEXT', 'updated_at': 'TEXT',
-                 'quick_hash': 'TEXT'}
+                 'quick_hash': 'TEXT', 'photos_uuid': 'TEXT'}
 
 # UTC timestamp with milliseconds, comparable as text.
 NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%f', 'now')"

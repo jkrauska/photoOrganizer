@@ -1,10 +1,12 @@
 """Live queue of source folders, processed one at a time by a long-running worker.
 
   photo-organizer-queue add PATH [PATH...]   add folders (any time, even while the worker runs)
+  photo-organizer-queue photos [YEAR...]     add Apple Photos library years (all, oldest first), copy-only
   photo-organizer-queue list                 show the queue
   photo-organizer-queue remove ID            drop a queued item
   photo-organizer-queue worker --dest DIR    process items in order, then wait for more
 
+An item is a folder or an Apple Photos library year ('photos:2016', see photos_library.py).
 Each item is a normal execute run (verified copy, then source delete; uncertain files stay).
 `make stop` stops the current item gracefully and the worker exits; the item goes back to
 'queued' and resumes when a worker starts again.
@@ -25,6 +27,7 @@ from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, acquire_run_lock, ini
 from photo_organizer.nas import detect as detect_nas
 from photo_organizer.transfer import backfill_hashes, hashes_pending
 from photo_organizer.constants import is_time_machine_path
+from photo_organizer.photos_library import is_photos_source, library_years, open_library, parse_source
 from photo_organizer.scanner import is_within
 from photo_organizer.state import DEFAULT_STOP_FILE, configure_stop_file, shutdown_requested, signal_handler
 
@@ -44,12 +47,20 @@ def _pid_alive(pid):
 
 
 def enqueue(conn, path, dest=None, keep_sources=False):
-    """Queue one folder (copy-only if keep_sources, always for backups). Returns (queued_path_or_None, message)."""
-    src = os.path.abspath(os.path.expanduser(path.strip())).rstrip('/') or '/'
-    if not os.path.isdir(src):
-        return None, f"not a folder: {src}"
-    if dest and (is_within(src, dest) or is_within(dest, src)):
-        return None, f"overlaps the store {dest}: {src}"
+    """Queue one folder (copy-only if keep_sources, always for backups) or Apple Photos year ('photos:2016',
+    always copy-only). Returns (queued_path_or_None, message)."""
+    if is_photos_source(path.strip()):
+        try:
+            src = f"photos:{parse_source(path)}"
+        except ValueError as e:
+            return None, str(e)
+        keep_sources = True
+    else:
+        src = os.path.abspath(os.path.expanduser(path.strip())).rstrip('/') or '/'
+        if not os.path.isdir(src):
+            return None, f"not a folder: {src}"
+        if dest and (is_within(src, dest) or is_within(dest, src)):
+            return None, f"overlaps the store {dest}: {src}"
     if conn.execute("SELECT 1 FROM queue WHERE source = ? AND status IN ('queued', 'running')",
                     (src,)).fetchone():
         return None, f"already queued: {src}"
@@ -105,6 +116,23 @@ def enqueue_split(conn, path, dest=None, keep_sources=False):
     message = f"queued {len(queued) - (top in queued):,} subfolders" + (" + the top folder" if top in queued else "")
     if problems:
         message += f"; skipped {len(problems)}: " + '; '.join(problems[:3])
+    return queued, message
+
+
+def enqueue_photos(conn, years=None, library=None):
+    """Queue Apple Photos library years oldest first (all years with assets by default).
+    Returns (queued sources, message)."""
+    counts = library_years(library or open_library())
+    years = sorted(int(y) for y in years) if years else list(counts)
+    queued, skipped = [], []
+    for y in years:
+        if y not in counts:
+            skipped.append(f"{y}: no photos")
+            continue
+        src, msg = enqueue(conn, f"photos:{y}")
+        (queued if src else skipped).append(src or msg)
+    message = (f"queued {len(queued)} Apple Photos years" + (f" ({queued[0][7:]}–{queued[-1][7:]})" if queued else '')
+               + (f"; skipped {len(skipped)}: " + '; '.join(skipped[:3]) if skipped else ''))
     return queued, message
 
 
@@ -214,7 +242,8 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
             _set_worker_state(conn, state='waiting: another run is active', next=item['source'])
             time.sleep(IDLE_POLL_SECONDS)
             continue
-        problem = ('folder not found' if not os.path.isdir(item['source'])
+        problem = (None if is_photos_source(item['source'])
+                   else 'folder not found' if not os.path.isdir(item['source'])
                    else 'overlaps the store' if is_within(item['source'], dest) or is_within(dest, item['source'])
                    else None)
         if problem:
@@ -267,6 +296,8 @@ def main():
                        help='Copy-only: never delete the originals (always on for Time Machine backups)')
     p_add.add_argument('--split', action='store_true',
                        help='Queue each subfolder as its own item, then the folder itself (for large folders)')
+    p_photos = sub.add_parser('photos', help='Queue Apple Photos library years (copy-only), oldest first')
+    p_photos.add_argument('years', nargs='*', type=int, help='Years to queue (default: every year in the library)')
     sub.add_parser('list')
     p_date = sub.add_parser('set-date', help="Write a capture date into a folder's undated files' EXIF, then queue it")
     p_date.add_argument('path')
@@ -286,6 +317,9 @@ def main():
     conn = init_db(args.db)
     if args.cmd == 'add':
         add(conn, args.paths, keep_sources=args.keep_sources, split=args.split)
+        list_queue(conn)
+    elif args.cmd == 'photos':
+        print(f"  {enqueue_photos(conn, args.years)[1]}")
         list_queue(conn)
     elif args.cmd == 'set-date':
         dated, failed = set_folder_date(conn, args.path, args.date)

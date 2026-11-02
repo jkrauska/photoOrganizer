@@ -6,6 +6,8 @@ description = "Sort photos into YEAR/MONTH/YYYY-MM-DD with SQLite tracking, plus
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "humanize>=4.15.0",
+    # Reads the Apple Photos library (photos:YYYY queue sources); 0.69 can't read macOS 27 libraries.
+    "osxphotos>=0.77",
 ]
 
 [dependency-groups]
@@ -17,7 +19,6 @@ dev = [
 
 [project.optional-dependencies]
 analysis = [
-    "osxphotos",
     # >=0.5 required for gemma4 model_type support.
     "mlx-vlm>=0.5",
     "insightface",
