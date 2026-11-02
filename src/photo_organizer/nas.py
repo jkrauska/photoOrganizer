@@ -103,6 +103,41 @@ def op_copy(src, dst, size, report):
         raise
     return s
 
+SAMPLE = 1 << 20
+
+def quick_offsets(size):    # same as hashing.quick_offsets
+    return sorted({0, max(size // 2 - SAMPLE // 2, 0), max(size - SAMPLE, 0)})
+
+def quick(path):            # same as hashing.quick_hash
+    size = os.path.getsize(path)
+    h = hashlib.sha256(str(size).encode())
+    with open(path, "rb", buffering=0) as f:
+        for off in quick_offsets(size):
+            h.update(os.pread(f.fileno(), SAMPLE, off))
+    return h.hexdigest()
+
+def op_copy_unhashed(src, dst, size):
+    """Clone src to dst without reading all of it: sizes and three 1 MB samples (start, middle,
+    end) must match. Returns the source's quick hash; the full hash is filled in later."""
+    if os.path.getsize(src) != size:
+        raise OSError(errno.EIO, "source size %d != catalog size %d" % (os.path.getsize(src), size))
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    clone(src, dst, size)
+    try:
+        if os.path.getsize(dst) != size:
+            raise OSError(errno.EIO, "copy size mismatch on NAS")
+        h = hashlib.sha256(str(size).encode())
+        with open(src, "rb", buffering=0) as a, open(dst, "rb", buffering=0) as b:
+            for off in quick_offsets(size):
+                sample = os.pread(a.fileno(), SAMPLE, off)
+                if sample != os.pread(b.fileno(), SAMPLE, off):
+                    raise OSError(errno.EIO, "copy sample mismatch on NAS at offset %d" % off)
+                h.update(sample)
+    except BaseException:
+        os.unlink(dst)
+        raise
+    return h.hexdigest()
+
 def handle(r):
     op = r["op"]
     if op == "ping":
@@ -117,6 +152,10 @@ def handle(r):
         return sha(r["path"], r.get("report"))
     if op == "copy":
         return op_copy(r["src"], r["dst"], r["size"], r.get("report"))
+    if op == "quick":
+        return quick(r["path"])
+    if op == "copy_unhashed":
+        return op_copy_unhashed(r["src"], r["dst"], r["size"])
     if op == "unlink":
         if os.path.isdir(r["path"]) or os.path.islink(r["path"]):
             raise OSError(errno.EISDIR, "not a regular file: " + r["path"])
@@ -162,6 +201,7 @@ class NasFS:
     """File operations executed on the NAS. Paths are this Mac's SMB paths, mapped per share."""
 
     verifies_copy = True    # copy_and_hash already compared source and copy hashes on the NAS
+    defers_hash = True      # can move a file that can't be a duplicate without reading it all
 
     def __init__(self, target, mapping, command=None):
         self.target = target                        # ssh destination, e.g. user@newnas.local
@@ -226,6 +266,14 @@ class NasFS:
 
     def copy_and_hash(self, src, dst, size, progress=None):
         return self.call('copy', progress, src=self.remote(src), dst=self.remote(dst), size=size)
+
+    def copy_unhashed(self, src, dst, size):
+        """Block-clone src to dst, checking size and sampled bytes only; the full hash comes
+        later. Returns the source's quick hash."""
+        return self.call('copy_unhashed', src=self.remote(src), dst=self.remote(dst), size=size)
+
+    def quick_hash(self, path):
+        return self.call('quick', path=self.remote(path))
 
     def unlink(self, path):
         self.call('unlink', path=self.remote(path))

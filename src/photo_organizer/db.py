@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS files (
     origin_path TEXT,
     dest_path TEXT,
     sha256 TEXT,
+    quick_hash TEXT,
     taken_at TEXT,
     exif_creation_date TEXT,
     file_modified_date TEXT,
@@ -69,7 +70,9 @@ CREATE TABLE IF NOT EXISTS queue (
 );
 """
 
-ADDED_COLUMNS = {'source_root': 'TEXT', 'origin_path': 'TEXT', 'taken_at': 'TEXT', 'updated_at': 'TEXT'}
+# quick_hash: SHA256 of size + three 1 MB samples (hashing.quick_hash); rules out duplicates cheaply.
+ADDED_COLUMNS = {'source_root': 'TEXT', 'origin_path': 'TEXT', 'taken_at': 'TEXT', 'updated_at': 'TEXT',
+                 'quick_hash': 'TEXT'}
 
 # UTC timestamp with milliseconds, comparable as text.
 NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%f', 'now')"

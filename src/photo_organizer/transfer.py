@@ -5,6 +5,11 @@ A source file is deleted only after its bytes are proven to be on the destinatio
   client cache bypassed and matched, then the source deleted;
 - duplicate content: the canonical copy is re-read from the NAS and matched, then the source deleted.
 Anything that fails verification keeps its source and is marked 'error'.
+
+Exception, NAS mode only: a file no other cataloged file matches in size and quick hash (size
+plus three 1 MB samples, so it can't be a duplicate) is moved as a ZFS block clone, checked by
+size and sampled bytes instead of a full read. The clone shares the source's checksummed blocks. Its row is 'done' with sha256 NULL until
+backfill_hashes reads it (worker idle time), and a same-size arrival hashes it first.
 """
 
 import os
@@ -18,7 +23,7 @@ import humanize
 
 from photo_organizer.constants import is_time_machine_path
 from photo_organizer.db import NOW_SQL
-from photo_organizer.hashing import LARGE_FILE, copy_and_hash, sha256_file
+from photo_organizer.hashing import LARGE_FILE, copy_and_hash, quick_hash, sha256_file
 from photo_organizer.progress import set_progress
 from photo_organizer.state import shutdown_requested
 
@@ -72,8 +77,12 @@ def retry_source_removal(conn, sources):
     for r in rows:
         try:
             if os.path.exists(r['original_path']):
-                if sha256_file(r['dest_path'], nocache=True) != r['sha256']:
+                stored = sha256_file(r['dest_path'], nocache=True)
+                expected = r['sha256'] or sha256_file(r['original_path'])   # deferred-hash move
+                if stored != expected:
                     continue
+                if not r['sha256']:
+                    conn.execute("UPDATE files SET sha256 = ? WHERE id = ?", (stored, r['id']))
                 remove_source(r['original_path'])
             conn.execute("UPDATE files SET error_message = NULL WHERE id = ?", (r['id'],))
             removed += 1
@@ -90,6 +99,7 @@ class LocalFS:
     """File operations through this Mac's mounts (SMB or local disk). NasFS mirrors this interface."""
 
     verifies_copy = False   # the copy must still be read back from the destination storage
+    defers_hash = False
     label = None
 
     exists = staticmethod(os.path.exists)
@@ -100,6 +110,10 @@ class LocalFS:
     ismount = staticmethod(os.path.ismount)
     rmdir = staticmethod(os.rmdir)
     rmtree = staticmethod(shutil.rmtree)
+
+    @staticmethod
+    def quick_hash(path):
+        return quick_hash(path, nocache=True)
 
     @staticmethod
     def entries(path):
@@ -277,6 +291,87 @@ def _copy_verify_delete(ctx, fid, src, dst, expected, size):
     return 'done', None
 
 
+HASH_PENDING = 'moved as a NAS block clone; full hash pending'
+
+
+def _clone_delete(ctx, fid, src, dst, size):
+    """NAS mode, content that can't be a duplicate: clone, check size + samples, delete source."""
+    fs = ctx.fs
+    try:
+        quick = fs.copy_unhashed(src, dst, size)
+    except BaseException:
+        try:
+            if fs.exists(dst):
+                fs.unlink(dst)
+        except OSError:
+            pass                # recover_interrupted removes it on the next run
+        raise
+    ctx.set_status(fid, 'done', None, f"{HASH_PENDING}; {COPY_ONLY}" if ctx.keep_sources else HASH_PENDING)
+    _store_quick(ctx, fid, quick)
+    if ctx.keep_sources:
+        return 'done', None
+    try:
+        fs.remove_source(src)
+    except OSError as e:
+        ctx.set_status(fid, 'done', None, f"{SOURCE_KEPT}{e}")
+        return 'source_kept', f"copied, but source not removed: {src}: {e}"
+    return 'done', None
+
+
+def _store_quick(ctx, fid, quick):
+    with ctx.db_lock:
+        ctx.conn.execute("UPDATE files SET quick_hash = ? WHERE id = ?", (quick, fid))
+        ctx.conn.commit()
+
+
+# Computing quick hashes for this many same-size files lacking one costs about what reading
+# the file in full does, so beyond it the full-hash path is taken instead.
+QUICK_CANDIDATE_LIMIT = 8
+
+
+def _quick_unique(ctx, fid, src, size):
+    """True if no other cataloged file has this size and quick hash, so src can't be a
+    duplicate. Quick hashes are stored as computed; any doubt (an unreadable or in-flight
+    candidate, too many to check) returns False and the full hash decides."""
+    quick = ctx.fs.quick_hash(src)
+    _store_quick(ctx, fid, quick)
+    others = ctx.conn.execute(
+        "SELECT id, status, original_path, dest_path, quick_hash FROM files "
+        "WHERE file_size = ? AND id != ? AND status IN ('pending', 'copying', 'done')", (size, fid),
+    ).fetchall()
+    if sum(1 for r in others if not r['quick_hash']) > QUICK_CANDIDATE_LIMIT:
+        return False
+    for r in others:
+        theirs = r['quick_hash']
+        if not theirs:
+            if r['status'] == 'copying':
+                return False
+            try:
+                theirs = ctx.fs.quick_hash(r['dest_path'] if r['status'] == 'done' else r['original_path'])
+            except OSError:
+                return False
+            _store_quick(ctx, r['id'], theirs)
+        if theirs == quick:
+            return False
+    return True
+
+
+def _hash_pending_same_size(ctx, size, quick=None):
+    """Fill in the hash of stored files moved without one that could match (same size and, when
+    known, same quick hash), so dedup can see them."""
+    rows = ctx.conn.execute(
+        "SELECT id, dest_path FROM files WHERE status = 'done' AND sha256 IS NULL AND file_size = ? "
+        "AND (? IS NULL OR quick_hash IS NULL OR quick_hash = ?)", (size, quick, quick),
+    ).fetchall()
+    for r in rows:
+        digest = ctx.fs.sha256(r['dest_path'], nocache=True)
+        with ctx.db_lock:
+            ctx.conn.execute("UPDATE files SET sha256 = ?, error_message = CASE WHEN error_message = ? "
+                             "THEN NULL ELSE error_message END WHERE id = ? AND sha256 IS NULL",
+                             (digest, HASH_PENDING, r['id']))
+            ctx.conn.commit()
+
+
 def transfer_one(ctx, fid, src, planned):
     try:
         if not ctx.fs.exists(src):
@@ -291,7 +386,19 @@ def transfer_one(ctx, fid, src, planned):
                 ctx.conn.execute("UPDATE files SET status = 'copying', dest_path = ? WHERE id = ?", (dst, fid))
                 ctx.conn.commit()
         if fast:
+            if ctx.fs.defers_hash:
+                return _clone_delete(ctx, fid, src, dst, size)
             return _copy_verify_delete(ctx, fid, src, dst, None, size)
+
+        if ctx.fs.defers_hash and _quick_unique(ctx, fid, src, size):
+            with ctx.db_lock:
+                dst = _claim_dest(ctx, fid, planned, None)
+                ctx.conn.execute("UPDATE files SET status = 'copying', dest_path = ? WHERE id = ?", (dst, fid))
+                ctx.conn.commit()
+            return _clone_delete(ctx, fid, src, dst, size)
+
+        quick = ctx.conn.execute("SELECT quick_hash FROM files WHERE id = ?", (fid,)).fetchone()[0]
+        _hash_pending_same_size(ctx, size, quick)
 
         src_hash = ctx.fs.sha256(src, progress=ctx.track(fid, src, size)('hashing source'))
         while True:
@@ -395,3 +502,58 @@ def execute_transfers(conn, file_ids, workers=4, verbose=False, keep_sources=Fal
     set_progress(conn, ctx.db_lock, batch_done=completed, large=[])
     print()
     return counts
+
+
+BACKFILL_FAILED = 'hash backfill failed: '
+
+
+def hashes_pending(conn):
+    return conn.execute(
+        "SELECT COUNT(*) FROM files WHERE status = 'done' AND sha256 IS NULL "
+        "AND COALESCE(error_message, '') NOT LIKE ?", (BACKFILL_FAILED + '%',)).fetchone()[0]
+
+
+def backfill_hashes(conn, fs=None, limit=200, workers=4, stop=shutdown_requested):
+    """Hash stored files moved without one (oldest first). A file whose content turns out to be
+    in the store already is a duplicate: once the other copy re-hashes equal, this copy is
+    deleted and the row becomes duplicate_removed. Returns (hashed, duplicates_removed)."""
+    ctx = TransferContext(conn, fs=fs)
+    rows = conn.execute(
+        "SELECT id, dest_path FROM files WHERE status = 'done' AND sha256 IS NULL "
+        "AND COALESCE(error_message, '') NOT LIKE ? ORDER BY id LIMIT ?", (BACKFILL_FAILED + '%', limit),
+    ).fetchall()
+
+    def digest_of(r):
+        if stop():
+            return None
+        try:
+            return ctx.fs.sha256(r['dest_path'], nocache=True)
+        except OSError as e:
+            ctx.set_status(r['id'], 'done', None, f"{BACKFILL_FAILED}{e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        digests = list(pool.map(digest_of, rows))
+    # Decide in id order so that of two identical unhashed copies the older one is kept.
+    hashed = dups = 0
+    for r, digest in zip(rows, digests):
+        if digest is None:
+            continue
+        hashed += 1
+        other = conn.execute(
+            "SELECT dest_path FROM files WHERE sha256 = ? AND status = 'done' AND id != ? ORDER BY id LIMIT 1",
+            (digest, r['id'])).fetchone()
+        if other and ctx.canonical_ok(other['dest_path'], digest):
+            ctx.fs.unlink(r['dest_path'])
+            conn.execute(
+                f"UPDATE files SET status = 'duplicate_removed', sha256 = ?, dest_path = NULL, "
+                f"updated_at = {NOW_SQL}, error_message = ? WHERE id = ?",
+                (digest, f"duplicate of {other['dest_path']} found when hashing after the move; "
+                         f"store copy removed", r['id']))
+            dups += 1
+        else:
+            conn.execute("UPDATE files SET sha256 = ?, error_message = CASE WHEN error_message = ? "
+                         "THEN NULL ELSE error_message END WHERE id = ?", (digest, HASH_PENDING, r['id']))
+            ctx.verified[r['dest_path']] = True     # just read from the store
+        conn.commit()
+    return hashed, dups

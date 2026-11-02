@@ -20,7 +20,9 @@ import time
 
 from photo_organizer.cli import run
 from photo_organizer.dates import DEFAULT_EXIF_WORKERS, require_exiftool
-from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, init_db
+from photo_organizer.db import DEFAULT_DB_PATH, RunLocked, acquire_run_lock, init_db
+from photo_organizer.nas import detect as detect_nas
+from photo_organizer.transfer import backfill_hashes, hashes_pending
 from photo_organizer.constants import is_time_machine_path
 from photo_organizer.scanner import is_within
 from photo_organizer.state import DEFAULT_STOP_FILE, configure_stop_file, shutdown_requested, signal_handler
@@ -103,6 +105,34 @@ def _summary(totals):
     return ', '.join(parts)
 
 
+BACKFILL_BATCH = 100
+
+
+def _backfill_when_idle(conn, dest, db_path, nas=True):
+    """With nothing queued, hash a batch of files moved without one (NAS block clones).
+    Holds the run lock so no run's dedup sees half-updated rows. True if work was done."""
+    pending = hashes_pending(conn)
+    if not pending or _other_run_active(conn):
+        return False
+    try:
+        lock_fd = acquire_run_lock(db_path)
+    except RunLocked:
+        return False
+    fs = None
+    try:
+        if nas:
+            fs, _ = detect_nas([], dest)
+        _set_worker_state(conn, state=f'idle: hashing files moved without a hash ({pending:,} left)')
+        hashed, dups = backfill_hashes(conn, fs, limit=BACKFILL_BATCH)
+        if dups:
+            print(f"Hash backfill: {dups:,} duplicate store copies removed")
+        return hashed > 0
+    finally:
+        if fs:
+            fs.close()
+        os.close(lock_fd)
+
+
 def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
     """Process queued folders in order; wait for more when the queue is empty."""
     conn.execute("UPDATE queue SET status = 'queued' WHERE status = 'running'")  # crash recovery
@@ -120,6 +150,8 @@ def worker(conn, dest, db_path, stop_file, exit_when_empty=False, **run_kwargs):
         if item is None:
             if exit_when_empty:
                 break
+            if _backfill_when_idle(conn, dest, db_path, run_kwargs.get('nas', True)):
+                continue
             _set_worker_state(conn, state='idle: waiting for queued folders')
             time.sleep(IDLE_POLL_SECONDS)
             continue

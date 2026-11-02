@@ -34,6 +34,24 @@ def sha256_file(filepath, nocache=False, progress=None):
     return h.hexdigest()
 
 
+QUICK_SAMPLE = 1 << 20
+
+
+def quick_offsets(size):
+    """Start, middle and end samples. nas.HELPER repeats this exactly; a test keeps them equal."""
+    return sorted({0, max(size // 2 - QUICK_SAMPLE // 2, 0), max(size - QUICK_SAMPLE, 0)})
+
+
+def quick_hash(path, nocache=False):
+    """SHA256 of the size and three 1 MB samples: different values prove different content."""
+    size = os.path.getsize(path)
+    h = hashlib.sha256(str(size).encode())
+    with _open_read(path, nocache) as f:
+        for off in quick_offsets(size):
+            h.update(os.pread(f.fileno(), QUICK_SAMPLE, off))
+    return h.hexdigest()
+
+
 def copy_and_hash(src, dst, progress=None):
     """Copy src to a new file dst in one read pass, returning the SHA256 of the bytes written.
     Fails if dst already exists. Only timestamps are carried over: SMB rejects local BSD flags

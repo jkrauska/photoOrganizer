@@ -29,7 +29,11 @@ def main():
     args = parser.parse_args()
 
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
-    query = "SELECT dest_path, sha256, file_size FROM files WHERE status = 'done'"
+    pending = conn.execute("SELECT COUNT(*) FROM files WHERE status = 'done' AND sha256 IS NULL").fetchone()[0]
+    if pending:
+        print(f"{pending:,} files moved as NAS block clones have no hash yet (the idle worker fills them in); "
+              f"skipping those")
+    query = "SELECT dest_path, sha256, file_size FROM files WHERE status = 'done' AND sha256 IS NOT NULL"
     params = ()
     if args.source:
         query += " AND source_root = ?"

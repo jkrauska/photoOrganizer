@@ -140,6 +140,8 @@ def snapshot(db_path):
         wrow = conn.execute("SELECT value FROM progress WHERE key = 'worker'").fetchone()
         worker = json.loads(wrow[0]) if wrow else {}
         worker['alive'] = bool(worker) and not worker.get('stopped') and _pid_alive(worker.get('pid'))
+        worker['hash_pending'] = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE status = 'done' AND sha256 IS NULL").fetchone()[0]
         try:
             queue = [dict(r) for r in conn.execute(
                 "SELECT id, status, source, added_at, finished_at, result, keep_sources, transfer FROM queue ORDER BY "
@@ -334,6 +336,7 @@ function render(d) {
   const w = d.worker || {};
   $('worker').textContent = w.alive ? `· worker ${w.pid}: ${w.state || ''}${w.current ? ' — ' + w.current : ''}`
     : (w.pid ? '· worker not running (make worker-bg)' : '· no worker yet (make worker-bg)');
+  if (w.hash_pending) $('worker').textContent += ` · ${num(w.hash_pending)} moved files awaiting their hash (filled in when idle)`;
   const qt = $('queue'); head(qt, [['#'], ['Status'], ['Transfer'], ['Folder'], ['Result'], ['']]);
   if (!d.queue.length) { const tr=row(qt); cell(tr, ''); cell(tr, 'empty', 'muted'); cell(tr, ''); cell(tr, 'add a folder above', 's'); cell(tr, ''); cell(tr, ''); }
   d.queue.forEach(q => { const tr=row(qt); cell(tr, q.id, 's');
