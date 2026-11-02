@@ -46,6 +46,7 @@ photo-index = "photo_organizer.analysis.index:main"
 photo-face-browser = "photo_organizer.analysis.face_browser:main"
 photo-ark-analyze = "photo_organizer.analysis.ark:main"
 photo-day-browser = "photo_organizer.analysis.day_browser:main"
+photo-shuffle = "photo_organizer.analysis.shuffle:main"
 
 [build-system]
 requires = ["hatchling"]

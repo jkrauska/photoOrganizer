@@ -21,6 +21,7 @@ PORT    ?= 8077
 FACES_PORT ?= 8078
 UI_HOST ?= 0.0.0.0
 DAYS_PORT ?= 8079
+SHUFFLE_PORT ?= 8080
 
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
@@ -38,7 +39,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
 .PHONY: help sync inventory run queue queue-photos set-date queue-list cameras cameras-stats worker worker-bg stop verify status enrich faces browse test \
-	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui
+	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
@@ -62,6 +63,7 @@ help:
 	@echo "make ark-seed   suggest names from the Apple Photos labels; ark-stats shows counts"
 	@echo "make ark-faces-ui  name face clusters in the photoArk analysis DB (http://$(shell hostname):$(FACES_PORT))"
 	@echo "make ark-days-ui  browse and search the day summaries (http://$(shell hostname):$(DAYS_PORT))"
+	@echo "make ark-shuffle-ui  random walk through the store, score photos 1-5 (http://$(shell hostname):$(SHUFFLE_PORT))"
 	@echo "make test       run the test suite"
 	@echo
 	@echo "SOURCES=$(SOURCES)"
@@ -161,6 +163,10 @@ ark-faces-ui:
 ark-days-ui:
 	uv sync --quiet --extra analysis
 	uv run photo-day-browser --host $(UI_HOST) --port $(DAYS_PORT)
+
+ark-shuffle-ui:
+	uv sync --quiet --extra analysis
+	uv run photo-shuffle --host $(UI_HOST) --port $(SHUFFLE_PORT)
 
 test:
 	uv run pytest -q
