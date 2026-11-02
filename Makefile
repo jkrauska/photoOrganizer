@@ -35,7 +35,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
 .PHONY: help sync inventory run queue set-date queue-list worker worker-bg stop verify status enrich faces browse test \
-	ark-faces ark-describe ark-seed ark-stats ark-faces-ui
+	ark-faces ark-describe ark-days ark-seed ark-stats ark-faces-ui
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
@@ -52,6 +52,7 @@ help:
 	@echo "make faces      face-cluster labeling app"
 	@echo "make browse     Datasette over the analysis index"
 	@echo "make ark-faces  faces for one store year (YEAR=2010); ark-describe adds Gemma, in background"
+	@echo "make ark-days   Gemma summaries of random day folders (whole store, or DAYS_YEAR=2010), in background"
 	@echo "make ark-seed   suggest names from the Apple Photos labels; ark-stats shows counts"
 	@echo "make ark-faces-ui  name face clusters in the photoArk analysis DB (127.0.0.1:$(FACES_PORT))"
 	@echo "make test       run the test suite"
@@ -119,6 +120,10 @@ ark-describe: | $(LOGDIR)
 	uv sync --quiet --extra analysis
 	@nohup uv run photo-ark-analyze run --year $(YEAR) > "$(LOGDIR)/ark-describe-$(YEAR)-$(STAMP).log" 2>&1 & \
 		echo "Gemma + faces running in background (pid $$!), log: $(LOGDIR)/ark-describe-$(YEAR)-$(STAMP).log"
+
+ark-days: | $(LOGDIR)
+	@nohup uv run photo-ark-analyze days $(if $(DAYS_YEAR),--year $(DAYS_YEAR)) > "$(LOGDIR)/ark-days-$(STAMP).log" 2>&1 & \
+		echo "Day summaries running in background (pid $$!), log: $(LOGDIR)/ark-days-$(STAMP).log"
 
 ark-seed:
 	uv run photo-ark-analyze seed-names

@@ -6,6 +6,7 @@ organizer's catalog), so they follow a file wherever it sits and survive renames
   photo-ark-analyze run --year 2010 [--no-vlm | --no-faces]   analyze stored images (resumable)
   photo-ark-analyze seed-names                                  suggest names from ~/gemma labels
   photo-ark-analyze cluster                                     group unnamed faces (DBSCAN)
+  photo-ark-analyze days [--year 2010]                          summarize random day folders
   photo-ark-analyze stats
 
 Names attach to faces (faces.person_id -> persons), never to cluster ids, so re-clustering
@@ -191,6 +192,18 @@ class VisionModel:
     def __call__(self, jpeg_path):
         from photo_organizer.analysis.analyze import analyze_with_gemma
         return analyze_with_gemma(self.model, self.processor, self.config, jpeg_path)
+
+    def text(self, prompt, max_tokens=500):
+        """Text-only reply parsed as JSON (or the raw reply), for the day summaries."""
+        from mlx_vlm import generate
+        from mlx_vlm.prompt_utils import apply_chat_template
+        formatted = apply_chat_template(self.processor, self.config, prompt, num_images=0)
+        out = generate(self.model, self.processor, formatted, max_tokens=max_tokens, verbose=False)
+        text = out.text if hasattr(out, 'text') else str(out)
+        try:
+            return json.loads(text.strip().strip('`').removeprefix('json').strip())
+        except json.JSONDecodeError:
+            return {'_raw_response': text, '_parse_error': True}
 
 
 # --- analysis --------------------------------------------------------------------------------
@@ -462,6 +475,18 @@ def main():
     p = sub.add_parser('cluster', help='group faces (DBSCAN, cosine)')
     p.add_argument('--eps', type=float, default=0.5)
     p.add_argument('--min-samples', type=int, default=3)
+    p = sub.add_parser('days', help='summarize day folders from sampled frames, in random order')
+    p.add_argument('--catalog', default=DEFAULT_DB_PATH)
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--year', type=int)
+    g.add_argument('--prefix', help='store folder, e.g. /Volumes/photoArk/2010 (default: whole store)')
+    p.add_argument('--dest', help='store root (default: from the catalog)')
+    p.add_argument('--limit', type=int, default=0, help='days to summarize this run')
+    p.add_argument('--gap', type=float, default=45, help='minutes between shots that start a new burst')
+    p.add_argument('--per-burst', type=int, default=3, help='frames captioned per burst at most')
+    p.add_argument('--max-samples', type=int, default=9, help='frames captioned per day at most')
+    p.add_argument('--seed', type=int, help='fix the random day order')
+    p.add_argument('--model', default=DEFAULT_VLM)
     sub.add_parser('stats')
     args = parser.parse_args()
 
@@ -476,6 +501,13 @@ def main():
             sys.exit("Nothing to do: both stages disabled")
         run(conn, images, face_fn, vlm_fn, None if args.no_vlm else args.model,
             log=lambda s: print(s, flush=True))
+    elif args.cmd == 'days':
+        from photo_organizer.analysis import days
+        found = days.select_days(args.catalog, args.year, args.prefix, args.dest)
+        vlm = VisionModel(args.model)
+        days.run_days(conn, found, vlm, vlm.text, args.model, seed=args.seed, limit=args.limit,
+                      gap_minutes=args.gap, per_burst=args.per_burst, max_samples=args.max_samples,
+                      log=lambda s: print(s, flush=True))
     elif args.cmd == 'seed-names':
         t = time.time()
         centroids = reference_centroids(load_reference_faces(args.data_dir))

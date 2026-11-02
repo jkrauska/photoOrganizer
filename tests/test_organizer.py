@@ -845,3 +845,63 @@ def test_ark_faces_guesses_a_named_person_for_a_cluster_until_told_no(tmp_path):
     assert ark_faces.guess_cluster(conn, 'c2') is None, "a No is remembered"
     ark_faces.forget_faces(conn, [9])
     assert conn.execute("SELECT COUNT(*) FROM face_not_person").fetchone()[0] == 4
+
+
+def test_ark_days_split_into_bursts_and_sample_each_burst():
+    from datetime import datetime, timedelta
+    from photo_organizer.analysis.days import plan_samples, split_bursts
+    t0 = datetime(2010, 6, 5, 9, 0)
+    items = ([(f'a{i}', f'a{i}.jpg', t0 + timedelta(minutes=i)) for i in range(30)]               # 09:00-09:29
+             + [(f'b{i}', f'b{i}.jpg', t0 + timedelta(hours=3, minutes=i)) for i in range(2)]     # 12:00-12:01
+             + [(f'c{i}', f'c{i}.jpg', t0 + timedelta(hours=8, minutes=10 * i)) for i in range(12)]  # 17:00-18:50
+             + [('u', 'u.jpg', None)])
+    bursts = split_bursts(items, gap_minutes=45)
+    assert [len(b) for b in bursts] == [30, 2, 12, 1]
+    samples = plan_samples(bursts, per_burst=3, max_samples=7)
+    assert [len(s) for s in samples] == [3, 1, 2, 1]                     # every burst is seen
+    assert samples[0] == [5, 15, 25]                                      # spread across the burst
+    assert [len(s) for s in plan_samples(bursts, per_burst=3, max_samples=2)] == [1, 0, 1, 0]
+    game = [(f'g{i}', f'g{i}.jpg', t0 + timedelta(minutes=2 * i)) for i in range(150)]   # one 5-hour burst
+    assert [len(s) for s in plan_samples(split_bursts(game), per_burst=3, max_samples=9)] == [9]
+
+
+def test_ark_days_summarize_random_days_once_from_sampled_captions(tmp_path):
+    from photo_organizer.analysis import ark, days
+    from photo_organizer.db import init_db
+    db = str(tmp_path / 'catalog.db')
+    cat = init_db(db)
+    n = 0
+    for day, count in [('2010-06-05', 6), ('2010-07-01', 1), ('2011-01-02', 2)]:
+        d = tmp_path / 'store' / day[:4] / day[5:7] / day
+        d.mkdir(parents=True)
+        for i in range(count):
+            p = d / f'{i}.jpg'
+            Image.new('RGB', (8, 8), (i * 30, 0, 0)).save(p)
+            n += 1
+            cat.execute("INSERT INTO files (original_path, filename, file_size, status, sha256, dest_path, taken_at) "
+                        "VALUES (?, ?, 1, 'done', ?, ?, ?)",
+                        (f'/src/{n}', p.name, f'h{n}', str(p), f'{day}T1{i}:00:00'))
+    cat.commit()
+    cat.close()
+    found = days.select_days(db, prefix=str(tmp_path / 'store' / '2010'))
+    assert sorted(len(v) for v in found.values()) == [1, 6]
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    captioned, prompts = [], []
+
+    def vlm(path):
+        captioned.append(path)
+        return {'caption': f'frame {len(captioned)}', 'keywords': ['beach']}
+
+    def summary(prompt):
+        prompts.append(prompt)
+        return {'title': 'Beach day', 'summary': 'A day at the beach.', 'keywords': ['beach', 3]}
+
+    assert days.run_days(conn, found, vlm, summary, 'gemma', seed=1, max_samples=4, log=lambda s: None) == 2
+    assert len(captioned) == 5                       # 4 of the 6 hourly bursts + the single photo
+    big = next(p for p in prompts if '6 photos' in p)
+    assert 'Saturday' in big and '6 burst(s)' in big and 'frame' in big and '[beach]' in big
+    row = conn.execute("SELECT * FROM days WHERE n_images = 6").fetchone()
+    assert row['title'] == 'Beach day' and json.loads(row['keywords']) == ['beach']
+    assert sum(len(b['samples']) for b in json.loads(row['bursts'])) == 4
+    assert days.run_days(conn, found, vlm, summary, 'gemma', log=lambda s: None) == 0   # done days skipped
+    assert len(captioned) == 5
