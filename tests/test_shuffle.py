@@ -55,3 +55,23 @@ def test_shuffle_serves_random_stored_photos_with_captions_and_keeps_scores(tmp_
     assert client.get('/api/photo/h1').json()['score'] == 4
     assert client.post('/api/score', json={'sha': 'h1', 'score': None}).status_code == 200    # 0 clears it
     assert client.get('/api/photo/h1').json()['score'] is None
+
+
+def test_shuffle_picks_the_day_first_so_bursts_dont_crowd_out_other_days(tmp_path):
+    from photo_organizer.analysis.shuffle import photo_days, random_photo
+    catalog = str(tmp_path / 'catalog.db')
+    conn = init_db(catalog)
+    burst, single = '/ark/2017/05/2017-05-20', '/ark/2017/05/2017-05-21'
+    rows = [(f'{burst}/{i:04}.jpg', f'b{i}', 'done') for i in range(200)]
+    rows += [(f'{single}/one.jpg', 's1', 'done'), (f'{single}/clip.mov', 's2', 'done'),
+             ('/ark/2017/05/2017-05-22/only.mov', 'v1', 'done'),        # a day of videos only
+             ('/ark/2017/05/2017-05-23/x.jpg', 'p1', 'pending')]       # not stored yet
+    conn.executemany("INSERT INTO files (filename, original_path, dest_path, sha256, status) VALUES ('f', ?, ?, ?, ?)",
+                     [(p, p, sha, status) for p, sha, status in rows])
+    conn.commit()
+    days = photo_days(conn)
+    assert days == [burst, single]
+    rng = random.Random(7)
+    picks = [random_photo(conn, days, rng)[0] for _ in range(400)]
+    assert 150 < picks.count('s1') < 250              # half the picks, not 1 in 201
+    assert 's2' not in picks

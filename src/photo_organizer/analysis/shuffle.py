@@ -3,7 +3,8 @@
 Run:   make ark-shuffle-ui   (or: uv run photo-shuffle)
 Then:  http://127.0.0.1:8080/
 
-Random stored photos (catalog files with status 'done', no videos) fade in with a slow pan/zoom.
+A random day folder, then a random stored photo in it (catalog files with status 'done', no
+videos), fades in with a slow pan/zoom.
 Space plays/pauses, ← → step back through the history and forward, 1–5 score the photo on screen
 and move on to the next one, 0 clears its score, + / - change the pace, F goes full screen. The
 bottom overlay shows when the photo was taken and Gemma's caption from analysis.db when there is one.
@@ -21,11 +22,13 @@ import os
 import random
 import socket
 import sqlite3
+import time
 import webbrowser
+from collections import deque
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Timer
+from threading import Lock, Timer
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -38,6 +41,8 @@ from photo_organizer.constants import PHOTO_EXTENSIONS
 PHOTO_SIDE = 2048
 DEFAULT_CATALOG = '~/.photo-organizer/catalog.db'
 DEFAULT_CACHE = '~/.photo-organizer/shuffle-cache'
+DAYS_REFRESH = 600              # seconds between rescans of the catalog's day folders
+RECENT_DAYS = 300               # don't revisit one of the last this many days shown
 
 SCORES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS photo_scores (
@@ -76,18 +81,25 @@ def _is_photo(path):
     return bool(path) and os.path.splitext(path)[1].lower() in PHOTO_EXTENSIONS
 
 
-def random_photo(catalog, rng=random):
-    """(sha256, dest_path, taken_at) of a random stored photo, or None. Jumps to a random id and
-    takes the first stored photo from there (wrapping around), so it needs no table scan."""
-    lo, hi = catalog.execute("SELECT min(id), max(id) FROM files").fetchone()
-    if lo is None:
+def photo_days(catalog):
+    """Sorted day folders that hold at least one stored photo."""
+    return sorted({os.path.dirname(path) for (path,) in catalog.execute(
+        "SELECT dest_path FROM files WHERE status = 'done' AND sha256 IS NOT NULL") if _is_photo(path)})
+
+
+def random_photo(catalog, days, rng=random):
+    """(sha256, dest_path, taken_at) of a random stored photo in a random one of the day folders,
+    or None. Picking the day first means a day of a thousand burst shots comes up no more often
+    than a day with a single photo."""
+    day = rng.choice(days)
+    rows = [r for r in catalog.execute(
+        "SELECT sha256, dest_path, taken_at FROM files WHERE dest_path >= ? AND dest_path < ? "
+        "AND status = 'done' AND sha256 IS NOT NULL", (day + '/', day + '0'))   # '0' sorts right after '/'
+        if os.path.dirname(r['dest_path']) == day and _is_photo(r['dest_path'])]
+    if not rows:
         return None
-    for start in [rng.randint(lo, hi) for _ in range(8)] + [lo]:
-        for r in catalog.execute("SELECT sha256, dest_path, taken_at FROM files WHERE id >= ? AND status = 'done' "
-                                 "AND sha256 IS NOT NULL ORDER BY id LIMIT 200", (start,)):
-            if _is_photo(r['dest_path']):
-                return r['sha256'], r['dest_path'], r['taken_at']
-    return None
+    r = rng.choice(rows)
+    return r['sha256'], r['dest_path'], r['taken_at']
 
 
 def describe(analysis, sha):
@@ -120,6 +132,18 @@ def make_app(catalog_path, analysis_path, cache_dir, rng=random):
         init_scores(rw)
     cache_dir = Path(cache_dir)
     app = FastAPI()
+    # The day list is a scan of the whole catalog, so it's kept and refreshed now and then (the
+    # transfer job keeps adding days). Recently shown days are skipped so days don't repeat soon.
+    days = {'list': [], 'at': 0.0}
+    recent = deque(maxlen=RECENT_DAYS)
+    lock = Lock()
+
+    def day_list(catalog):
+        with lock:
+            if not days['list'] or time.monotonic() - days['at'] > DAYS_REFRESH:
+                days['list'], days['at'] = photo_days(catalog), time.monotonic()
+                recent.clear()
+            return days['list']
 
     def stored_path(catalog, sha):
         for r in catalog.execute("SELECT dest_path FROM files WHERE sha256 = ? AND status = 'done'", (sha,)):
@@ -130,11 +154,20 @@ def make_app(catalog_path, analysis_path, cache_dir, rng=random):
     @app.get("/api/random")
     def api_random():
         with closing(connect_ro(catalog_path)) as catalog, closing(connect_ro(analysis_path)) as analysis:
+            folders = day_list(catalog)
+            if not folders:
+                raise HTTPException(404, "no stored photos in the catalog")
+            fresh = len(folders) > 2 * len(recent)
             for _ in range(20):         # skip catalog rows whose file isn't there (store offline, moved)
-                hit = random_photo(catalog, rng)
+                hit = random_photo(catalog, folders, rng)
                 if hit is None:
-                    raise HTTPException(404, "no stored photos in the catalog")
+                    continue
                 sha, path, taken_at = hit
+                day = os.path.dirname(path)
+                with lock:
+                    if fresh and day in recent:
+                        continue
+                    recent.append(day)
                 if os.path.exists(path):
                     return {'sha': sha, 'path': path, 'taken_at': taken_at, **describe(analysis, sha)}
         raise HTTPException(503, "photos in the catalog are missing on disk (is the store mounted?)")
