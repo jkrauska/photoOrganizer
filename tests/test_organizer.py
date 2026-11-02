@@ -669,3 +669,100 @@ def test_ark_seed_names_suggests_without_touching_manual_labels(tmp_path):
         "SELECT f.face_idx, p.name, f.person_source FROM faces f LEFT JOIN persons p ON p.id = f.person_id")}
     assert got == {0: ('Alice', 'suggested'), 1: ('Bob', 'suggested'), 2: (None, None), 3: ('Carol', 'manual')}
     assert ark.seed_names(conn, centroids) == {'Alice': 1, 'Bob': 1}, "re-seeding replaces old suggestions"
+
+
+def _ark_face_db(tmp_path):
+    """Analysis DB with one oriented image: faces 1-3 in cluster 0, face 4 unclustered."""
+    from photo_organizer.analysis import ark
+    img = tmp_path / 'p.jpg'
+    exif = Image.Exif()
+    exif[0x0112] = 6                                             # stored 80x40, shown 40x80
+    im = Image.new('RGB', (80, 40), (0, 0, 255))
+    im.paste((255, 0, 0), (0, 0, 40, 40))                        # left half red -> top half once turned
+    im.save(img, 'JPEG', exif=exif)
+    db = str(tmp_path / 'analysis.db')
+    conn = ark.open_db(db)
+    conn.execute("INSERT INTO images (sha256, path, width, height) VALUES ('h', ?, 40, 80)", (str(img),))
+    for idx, (cluster, box) in enumerate([(0, (5, 5, 35, 35)), (0, (5, 45, 35, 75)),
+                                          (0, (0, 0, 40, 40)), (None, (0, 40, 40, 80))]):
+        conn.execute("INSERT INTO faces (id, sha256, face_idx, x1, y1, x2, y2, det_score, cluster_id) "
+                     "VALUES (?, 'h', ?, ?, ?, ?, ?, ?, ?)", (idx + 1, idx, *box, 0.9 - idx / 10, cluster))
+    conn.commit()
+    return db, conn
+
+
+def _ark_names(conn):
+    return {r['id']: (r['name'], r['person_source']) for r in conn.execute(
+        "SELECT f.id, p.name, f.person_source FROM faces f LEFT JOIN persons p ON p.id = f.person_id")}
+
+
+def test_ark_faces_lists_clusters_and_names_clusters_and_faces(tmp_path):
+    from photo_organizer.analysis import ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    got = ark_faces.list_clusters(conn)
+    assert [(c['id'], c['count'], c['label']) for c in got] == [('c0', 3, ''), ('unclustered', 1, '')]
+    assert got[0]['sample'] == '/face/1.jpg', "sample is the best detection"
+    assert [f['id'] for f in ark_faces.cluster_detail(conn, 'unclustered')] == [4]
+    with pytest.raises(KeyError):
+        ark_faces.cluster_detail(conn, 'x1')
+
+    ark_faces.name_faces(conn, [2], 'Bob')                       # an individual override
+    assert ark_faces.name_cluster(conn, 'c0', 'Alice') == 2
+    assert _ark_names(conn) == {1: ('Alice', 'manual'), 2: ('Bob', 'manual'),
+                                3: ('Alice', 'manual'), 4: (None, None)}
+    assert ark_faces.list_clusters(conn)[0]['label'] == 'Alice'
+    assert ark_faces.name_cluster(conn, 'c0', 'Alicia') == 2, "a rename follows the cluster's name"
+    assert _ark_names(conn)[2] == ('Bob', 'manual') and _ark_names(conn)[1] == ('Alicia', 'manual')
+    with pytest.raises(ValueError):
+        ark_faces.name_cluster(conn, 'unclustered', 'X')
+    ark_faces.name_faces(conn, [4], ' Carol ')
+    ark_faces.name_faces(conn, [2], '')
+    assert _ark_names(conn)[4] == ('Carol', 'manual') and _ark_names(conn)[2] == (None, None)
+    assert ark_faces.persons(conn) == ['Alice', 'Alicia', 'Bob', 'Carol']
+
+
+def test_ark_faces_accepts_and_rejects_suggestions_and_reseed_skips_rejected(tmp_path):
+    from photo_organizer.analysis import ark, ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    emb = np.full(512, 1 / np.sqrt(512), dtype=np.float32)
+    conn.execute("UPDATE faces SET embedding = ?", (emb.tobytes(),))
+    conn.commit()
+    assert ark.seed_names(conn, {'Dee': (emb, 1, '')}) == {'Dee': 4}
+    assert ark_faces.accept_suggestions(conn, [1, 2]) == 2
+    assert ark_faces.reject_suggestions(conn, [3, 1]) == 1, "only suggested faces can be rejected"
+    assert _ark_names(conn) == {1: ('Dee', 'manual'), 2: ('Dee', 'manual'),
+                                3: (None, 'rejected'), 4: ('Dee', 'suggested')}
+    assert ark.seed_names(conn, {'Dee': (emb, 1, '')}) == {'Dee': 1}
+    assert _ark_names(conn)[3] == (None, 'rejected'), "a rejected suggestion is not made again"
+
+
+def test_ark_faces_crops_from_the_oriented_image(tmp_path):
+    from photo_organizer.analysis import ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    crops = tmp_path / 'crops'
+    top = Image.open(ark_faces.ensure_crop(conn, 3, crops)).convert('RGB')
+    bottom = Image.open(ark_faces.ensure_crop(conn, 4, crops)).convert('RGB')
+    assert top.size == (40, 50), "padded, clipped to the image"
+    r, g, b = top.getpixel((20, 15))
+    assert r > 200 and b < 60, "bbox is in pixels of the EXIF-oriented image"
+    r, g, b = bottom.getpixel((20, 35))
+    assert b > 200 and r < 60
+    assert len(list(crops.iterdir())) == 2
+    with pytest.raises(KeyError):
+        ark_faces.ensure_crop(conn, 99, crops)
+
+
+def test_ark_face_browser_app_names_over_http(tmp_path):
+    pytest.importorskip('fastapi')
+    pytest.importorskip('httpx')
+    from fastapi.testclient import TestClient
+    from photo_organizer.analysis.face_browser import make_ark_app
+    db, conn = _ark_face_db(tmp_path)
+    client = TestClient(make_ark_app(db, tmp_path / 'crops'))
+    assert [c['id'] for c in client.get('/api/clusters').json()] == ['c0', 'unclustered']
+    assert client.post('/api/label', json={'cluster_id': 'c0', 'label': 'Alice'}).json()['changed'] == 3
+    assert client.post('/api/label_face', json={'face_id': 4, 'label': 'Bob'}).status_code == 200
+    assert client.post('/api/label_face', json={'face_id': 99, 'label': 'Bob'}).status_code == 404
+    assert client.get('/api/cluster/c9x').status_code == 404
+    assert client.get('/face/1.jpg').headers['content-type'] == 'image/jpeg'
+    assert client.get('/api/persons').json() == ['Alice', 'Bob']
