@@ -364,6 +364,11 @@ class ArkFaceLabelIn(BaseModel):
     label: str
 
 
+class ArkFacesLabelIn(BaseModel):
+    face_ids: list[int]
+    label: str
+
+
 class ArkSuggestionsIn(BaseModel):
     face_ids: list[int]
     accept: bool
@@ -465,6 +470,14 @@ def make_ark_app(db_path, crop_dir, catalog_path=None) -> FastAPI:
             if not ark_faces.name_faces(conn, [body.face_id], body.label):
                 raise HTTPException(404, "face not found")
         return {"ok": True}
+
+    @ark.post("/api/label_faces")
+    def label_faces(body: ArkFacesLabelIn):
+        if not body.label.strip():
+            raise HTTPException(400, "a name is needed")
+        with db() as conn:
+            return {"ok": True, "changed": ark_faces.name_faces(conn, body.face_ids, body.label)
+                    if body.face_ids else 0}
 
     @ark.post("/api/suggestions")
     def suggestions(body: ArkSuggestionsIn):
@@ -814,11 +827,25 @@ function selectedIds() {
 function renderForgetRow() {
   const n = selectedIds().length;
   const unnamed = faces.filter(f => !f.name).length;
+  const typed = document.getElementById('selName')?.value ?? (guess ? guess.name : '');
   document.getElementById('forgetRow').innerHTML =
-    (n ? `<button class="danger" onclick="forget(selectedIds())">Forget ${n} selected</button>
+    (n ? `<input id="selName" list="persons" placeholder="name…" value="${escapeHtml(typed)}"
+            onkeydown="if (event.key === 'Enter') nameSelected()">
+          <button class="primary" onclick="nameSelected()">Name ${n} selected</button>
+          <button class="danger" onclick="forget(selectedIds())">Forget ${n} selected</button>
           <button onclick="clearSelection()">Clear selection</button>` : '') +
     (currentId !== 'unclustered' && unnamed
       ? `<button class="danger" onclick="forgetCluster(${unnamed})">Forget ${unnamed} unnamed face${unnamed===1?'':'s'} in this cluster</button>` : '');
+}
+
+async function nameSelected() {
+  const label = document.getElementById('selName').value.trim();
+  const ids = selectedIds();
+  if (!label || !ids.length) { document.getElementById('selName').focus(); return; }
+  const y = window.scrollY;
+  await post('/api/label_faces', {face_ids: ids, label});
+  await refresh();
+  window.scrollTo(0, y);
 }
 
 function toggleSelect(img) {

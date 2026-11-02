@@ -783,11 +783,14 @@ def test_ark_face_browser_app_names_over_http(tmp_path):
     assert client.post('/api/label', json={'cluster_id': 'c0', 'label': 'Alice'}).json()['changed'] == 3
     assert client.post('/api/label_face', json={'face_id': 4, 'label': 'Bob'}).status_code == 200
     assert client.post('/api/label_face', json={'face_id': 99, 'label': 'Bob'}).status_code == 404
+    assert client.post('/api/label_faces', json={'face_ids': [1, 2], 'label': 'Cy'}).json()['changed'] == 2
+    assert client.post('/api/label_faces', json={'face_ids': [1], 'label': ' '}).status_code == 400
+    assert _ark_names(conn)[1] == ('Cy', 'manual') and _ark_names(conn)[2] == ('Cy', 'manual')
     assert client.get('/api/cluster/c9x').status_code == 404
     assert client.get('/face/1.jpg').headers['content-type'] == 'image/jpeg'
     assert client.get('/photo/1.jpg').headers['content-type'] == 'image/jpeg'
     assert client.get('/photo/99.jpg').status_code == 404
-    assert client.get('/api/persons').json() == ['Alice', 'Bob']
+    assert client.get('/api/persons').json() == ['Alice', 'Bob', 'Cy']
     assert client.post('/api/forget', json={'face_ids': [4]}).json()['deleted'] == 1
     client.post('/api/label_face', json={'face_id': 3, 'label': ''})
     assert client.post('/api/forget', json={'cluster_id': 'c0'}).json()['deleted'] == 1
