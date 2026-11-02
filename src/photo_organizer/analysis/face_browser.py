@@ -473,9 +473,7 @@ def make_ark_app(db_path, crop_dir, catalog_path=None) -> FastAPI:
 
     @ark.post("/api/label_faces")
     def label_faces(body: ArkFacesLabelIn):
-        if not body.label.strip():
-            raise HTTPException(400, "a name is needed")
-        with db() as conn:
+        with db() as conn:                  # an empty name clears them
             return {"ok": True, "changed": ark_faces.name_faces(conn, body.face_ids, body.label)
                     if body.face_ids else 0}
 
@@ -530,6 +528,8 @@ ARK_HTML = r"""<!doctype html>
   #grid .forget { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; border-radius: 13px; border: none;
                   background: rgba(0,0,0,0.55); color: white; font-size: 14px; cursor: pointer; display: none; }
   #grid figure:hover .forget { display: block; }
+  #grid .burst { position: absolute; top: 4px; left: 4px; padding: 1px 7px; border-radius: 10px;
+                 background: rgba(0,0,0,0.6); color: white; font-size: 12px; font-weight: 600; }
   #header button.danger { border-color: #d33; color: #d33; }
   #guessRow:empty { display: none; }
   #guessRow { background: #eef6ff; border: 1px solid #9cc3ee; border-radius: 8px; padding: 10px 12px; font-size: 16px; }
@@ -674,21 +674,23 @@ async function loadFaces() {
   faces = await fetch(`/api/cluster/${currentId}`).then(r => r.json());
   const sugg = faces.filter(f => f.source === 'suggested');
   document.getElementById('suggRow').innerHTML = sugg.length
-    ? `<button onclick="judge(${JSON.stringify(sugg.map(f => f.id))}, true)">Accept ${sugg.length} suggested name${sugg.length===1?'':'s'}</button>
-       <button onclick="judge(${JSON.stringify(sugg.map(f => f.id))}, false)">Reject all suggestions</button>` : '';
+    ? `<button onclick="judge(${JSON.stringify(sugg.flatMap(idsOf))}, true)">Accept ${sugg.length} suggested name${sugg.length===1?'':'s'}</button>
+       <button onclick="judge(${JSON.stringify(sugg.flatMap(idsOf))}, false)">Reject all suggestions</button>` : '';
   renderForgetRow();
   // Faces not yet named by hand first, so a cluster's new matches can be checked at a glance
   // before naming them; the named ones follow, grouped by name (the server sends this order).
   const todo = faces.filter(f => f.source !== 'manual');
   const named = faces.filter(f => f.source === 'manual');
   const c = clusters.find(x => x.id === currentId);
-  const more = c && c.count > faces.length ? ` <small>· showing ${faces.length} of ${c.count}</small>` : '';
+  const shown = shownIds().length;
+  const more = c && c.count > shown ? ` <small>· showing ${shown} of ${c.count}</small>` : '';
   const heading = (text, note = '') => `<h3>${text}${note}</h3>`;
   let lastName = null;
   const groups = [];
   if (todo.length) {
     const to = todo.find(f => f.sim !== undefined)?.sim_to;
-    groups.push(heading(`Not yet named · ${todo.length}`,
+    const nTodo = todo.flatMap(idsOf).length;
+    groups.push(heading(`Not yet named · ${nTodo}` + (nTodo > todo.length ? ` in ${todo.length} shots` : ''),
       ` <small>check these all match before naming the cluster` +
       (to !== undefined ? ` · grouped by similarity to ${to ? escapeHtml(to) : 'the cluster'}, in shooting order` : '') +
       `</small>${more}`));
@@ -740,7 +742,8 @@ function selectBand(band) {
 function figureHtml(f) {
   return `
     <figure data-id="${f.id}">
-      <button class="forget" title="Forget this face (delete it)" onclick="forget([${f.id}])">✕</button>
+      <button class="forget" title="Forget this face (delete it)" onclick="forget(${JSON.stringify(idsOf(f))})">✕</button>
+      ${f.burst?.length ? `<span class="burst" title="${f.burst.length + 1} photos of the same second: named and forgotten together">×${f.burst.length + 1}</span>` : ''}
       <img src="${f.face_url}" loading="lazy" title="Click to select · ${escapeHtml(f.path)}" onclick="toggleSelect(this)" ondblclick="openViewer(${f.id})">
       <figcaption title="${escapeHtml(f.path)}${f.sim !== undefined ? ' · similarity ' + f.sim.toFixed(2) : ''}">${escapeHtml(f.filename)} · ${f.taken ? escapeHtml(f.taken.slice(0, 10)) : (f.det_score ?? 0).toFixed(2)}</figcaption>
       ${f.source === 'suggested' ? `<div class="sugg"><span>${escapeHtml(f.name)} (${(f.score ?? 0).toFixed(2)})?</span>
@@ -820,8 +823,14 @@ async function guessNo() {
   document.getElementById('labelInput')?.focus();
 }
 
+// A tile can stand for a burst (photos of the same second, face in the same place): its
+// other face ids ride along wherever the tile is named, forgotten or judged.
+const idsOf = f => [f.id, ...(f.burst || [])];
+const shownIds = () => faces.flatMap(idsOf);
+
 function selectedIds() {
-  return [...document.querySelectorAll('#grid figure.selected')].map(el => parseInt(el.dataset.id, 10));
+  const sel = new Set([...document.querySelectorAll('#grid figure.selected')].map(el => parseInt(el.dataset.id, 10)));
+  return faces.filter(f => sel.has(f.id)).flatMap(idsOf);
 }
 
 function renderForgetRow() {
@@ -887,7 +896,8 @@ async function judge(ids, accept) {
 async function saveFaceLabel(inp) {
   const label = inp.value.trim();
   if (label === (inp.dataset.prev || '')) return;
-  await post('/api/label_face', {face_id: parseInt(inp.dataset.id, 10), label});
+  const f = faces.find(x => x.id === parseInt(inp.dataset.id, 10));
+  await post('/api/label_faces', {face_ids: f ? idsOf(f) : [parseInt(inp.dataset.id, 10)], label});
   inp.dataset.prev = label;
   inp.classList.toggle('saved', !!label);
   await loadClusters();
@@ -896,10 +906,10 @@ async function saveFaceLabel(inp) {
 async function saveLabel(advance) {
   const label = document.getElementById('labelInput').value.trim();
   // Only the faces on screen: a big cluster shows its first 500, and the rest are unchecked.
-  await post('/api/label', {cluster_id: currentId, label, face_ids: faces.map(f => f.id)});
+  await post('/api/label', {cluster_id: currentId, label, face_ids: shownIds()});
   await loadClusters();
   const total = clusters.find(c => c.id === currentId)?.count || 0;
-  if (advance && total <= faces.length) {
+  if (advance && total <= shownIds().length) {
     const order = sortedClusters();
     const idx = order.findIndex(x => x.id === currentId);
     const next = order.slice(idx + 1).find(x => !x.label && x.id !== 'unclustered')

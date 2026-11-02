@@ -784,8 +784,10 @@ def test_ark_face_browser_app_names_over_http(tmp_path):
     assert client.post('/api/label_face', json={'face_id': 4, 'label': 'Bob'}).status_code == 200
     assert client.post('/api/label_face', json={'face_id': 99, 'label': 'Bob'}).status_code == 404
     assert client.post('/api/label_faces', json={'face_ids': [1, 2], 'label': 'Cy'}).json()['changed'] == 2
-    assert client.post('/api/label_faces', json={'face_ids': [1], 'label': ' '}).status_code == 400
     assert _ark_names(conn)[1] == ('Cy', 'manual') and _ark_names(conn)[2] == ('Cy', 'manual')
+    assert client.post('/api/label_faces', json={'face_ids': [2], 'label': ' '}).json()['changed'] == 1
+    assert _ark_names(conn)[2] == (None, None)
+    client.post('/api/label_faces', json={'face_ids': [2], 'label': 'Cy'})
     assert client.get('/api/cluster/c9x').status_code == 404
     assert client.get('/face/1.jpg').headers['content-type'] == 'image/jpeg'
     assert client.get('/photo/1.jpg').headers['content-type'] == 'image/jpeg'
@@ -1025,6 +1027,31 @@ def test_ark_faces_cluster_detail_bands_unnamed_faces_by_similarity_in_shooting_
     # Without a catalog the store's date folders and filenames decide within a band.
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0')][:4] == [5, 4, 7, 6]
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0', limit=2)] == [5, 4]
+
+
+def test_ark_faces_cluster_detail_shows_a_burst_of_the_same_second_once(tmp_path):
+    from photo_organizer.analysis import ark, ark_faces
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    e = np.full(512, 1 / np.sqrt(512), dtype=np.float32).tobytes()
+    # (face id, image, box, det): 1-3 one burst; 4 same second but elsewhere in the frame;
+    # 5 same place a second later; 6 a second face in image a
+    faces = [(1, 'a', (10, 10, 50, 50), 0.8), (2, 'b', (12, 11, 52, 50), 0.95), (3, 'c', (9, 10, 49, 52), 0.7),
+             (4, 'd', (200, 10, 240, 50), 0.9), (5, 'e', (10, 10, 50, 50), 0.9), (6, 'a', (14, 12, 54, 52), 0.6)]
+    for fid, sha, (x1, y1, x2, y2), det in faces:
+        conn.execute("INSERT OR IGNORE INTO images (sha256, path) VALUES (?, ?)", (sha, f'/s/2019/01/2019-01-05/{sha}.jpg'))
+        conn.execute("INSERT INTO faces (id, sha256, face_idx, x1, y1, x2, y2, det_score, cluster_id, embedding) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)", (fid, sha, fid, x1, y1, x2, y2, det, e))
+    cat_path = tmp_path / 'catalog.db'
+    cat = sqlite3.connect(cat_path)
+    cat.execute("CREATE TABLE files (sha256 TEXT, taken_at TEXT)")
+    cat.executemany("INSERT INTO files VALUES (?, ?)", [(s, '2019-01-05T10:00:00-08:00') for s in 'abcd']
+                    + [('e', '2019-01-05T10:00:01-08:00')])
+    cat.commit()
+    cat.close()
+    got = {f['id']: f['burst'] for f in ark_faces.cluster_detail(conn, 'c0', catalog_path=str(cat_path))}
+    assert got[2] == [1, 3], "the best detection leads its burst"
+    assert got[4] == [] and got[5] == [] and got[6] == [], "elsewhere, a second later, or the same photo"
+    assert 1 not in got and 3 not in got
 
 
 def test_ark_days_marked_wrong_are_redone_first_with_more_frames_and_the_note(tmp_path):

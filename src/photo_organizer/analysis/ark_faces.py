@@ -26,6 +26,7 @@ FULL_MAX_SIDE = 2048
 # matches scored 0.6-0.7 while sisters' clusters reached 0.49 against each other.
 GUESS_MIN = 0.55
 GUESS_MARGIN = 0.15
+BURST_IOU = 0.5         # face boxes overlapping this much in photos of the same second: one shot
 
 
 def connect(db_path):
@@ -134,21 +135,54 @@ def _when(path, taken):
     return m.group(1) if m else '9999'
 
 
+def _iou(a, b):
+    w = min(a['x2'], b['x2']) - max(a['x1'], b['x1'])
+    h = min(a['y2'], b['y2']) - max(a['y1'], b['y1'])
+    if w <= 0 or h <= 0:
+        return 0.0
+    area = lambda r: (r['x2'] - r['x1']) * (r['y2'] - r['y1'])
+    return w * h / (area(a) + area(b) - w * h)
+
+
+def _bursts(rows, taken, min_iou=BURST_IOU):
+    """{leader id: [other ids]}: faces in photos taken in the same second with the face box in
+    about the same place are one shot, shown once; the best detection leads."""
+    by_second = {}
+    for r in rows:
+        t = taken.get(r['sha256'])
+        if t and r['x1'] is not None:
+            by_second.setdefault(t[:19], []).append(r)
+    out = {}
+    for group in by_second.values():
+        leaders, photos = [], {}            # photos: leader id -> its burst's images (one face each)
+        for r in sorted(group, key=lambda r: (-(r['det_score'] or 0), r['id'])):
+            lead = next((l for l in leaders if r['sha256'] not in photos[l['id']] and _iou(l, r) >= min_iou), None)
+            if lead is None:
+                leaders.append(r)
+                out[r['id']], photos[r['id']] = [], {r['sha256']}
+            else:
+                out[lead['id']].append(r['id'])
+                photos[lead['id']].add(r['sha256'])
+    return {k: v for k, v in out.items() if v}
+
+
 def cluster_detail(conn, cid, limit=500, catalog_path=None):
     """Faces of a cluster: not yet named by hand first (the ones to review), then the named ones
     grouped by name. The unnamed ones come in similarity bands of 0.1 (to the cluster's name or
     guessed name, else to the cluster's average face), most similar band first and in shooting
     order within a band (catalog_path gives the times), so a shoot's wrong matches sit together;
-    unclustered faces go by detection score."""
+    unclustered faces go by detection score. Faces of one burst (same second, same place) come
+    as one entry whose 'burst' lists the other face ids; naming or forgetting it covers them all."""
     where, params = _cluster_where(cid)
     rows = conn.execute(
         f"SELECT f.id, f.sha256, f.face_idx, f.det_score, f.person_source, f.person_score, f.embedding, "
+        f"f.x1, f.y1, f.x2, f.y2, "
         f"p.name, i.path FROM faces f JOIN images i ON i.sha256 = f.sha256 "
         f"LEFT JOIN persons p ON p.id = f.person_id WHERE {where} "
         f"ORDER BY f.person_source IS 'manual', p.name, f.det_score DESC, f.id", params).fetchall()
     todo = [r for r in rows if r['person_source'] != 'manual']
     named = [r for r in rows if r['person_source'] == 'manual']
-    sim, sim_to, taken = {}, '', {}
+    sim, sim_to, taken, bursts = {}, '', {}, {}
     if cid != UNCLUSTERED and todo:
         sim_to, ref = _reference(conn, cid, rows)
         if ref is not None:
@@ -157,12 +191,15 @@ def cluster_detail(conn, cid, limit=500, catalog_path=None):
                 sim = dict(zip([r['id'] for r in have],
                                (_unit_rows([_unpack(r['embedding']) for r in have]) @ ref).tolist()))
             taken = taken_times(catalog_path, {r['sha256'] for r in todo})
+            bursts = _bursts(todo, taken)
+            hidden = {i for ids in bursts.values() for i in ids}
+            todo = [r for r in todo if r['id'] not in hidden]
             band = lambda r: int(np.floor(sim[r['id']] * 10)) if r['id'] in sim else -99
             todo.sort(key=lambda r: (-band(r), _when(r['path'], taken.get(r['sha256'])), r['path'], r['id']))
     return [{'id': r['id'], 'filename': os.path.basename(r['path']), 'path': r['path'],
              'det_score': r['det_score'], 'name': r['name'] or '', 'source': r['person_source'] or '',
              'score': r['person_score'], 'face_url': f"/face/{r['id']}.jpg",
-             'taken': taken.get(r['sha256']) or '',
+             'taken': taken.get(r['sha256']) or '', 'burst': bursts.get(r['id'], []),
              **({'sim': round(sim[r['id']], 3), 'sim_to': sim_to} if r['id'] in sim else {})}
             for r in (todo + named)[:limit]]
 
