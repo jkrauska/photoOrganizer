@@ -962,3 +962,11 @@ def test_ark_day_browser_searches_summaries_and_captions_and_opens_only_known_da
     assert client.post('/api/open', json={'day': '/etc'}).status_code == 404
     assert client.post('/api/open', json={'day': '/x/2011/01/2011-01-02'}).status_code == 404   # not mounted
     assert client.get('/').status_code == 200
+
+
+def test_ark_faces_cluster_detail_lists_unnamed_faces_before_named_ones(tmp_path):
+    from photo_organizer.analysis import ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    ark_faces.name_faces(conn, [1], 'Zed')
+    ark_faces.name_faces(conn, [3], 'Amy')
+    assert [f['id'] for f in ark_faces.cluster_detail(conn, 'c0')] == [2, 3, 1]

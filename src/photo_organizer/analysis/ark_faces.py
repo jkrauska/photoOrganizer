@@ -80,12 +80,15 @@ def list_clusters(conn):
 
 
 def cluster_detail(conn, cid, limit=500):
+    """Faces of a cluster: not yet named by hand first (the ones to review), then the named ones
+    grouped by name; best detections first within each."""
     where, params = _cluster_where(cid)
     rows = conn.execute(
         f"SELECT f.id, f.sha256, f.face_idx, f.det_score, f.person_source, f.person_score, "
         f"p.name, i.path FROM faces f JOIN images i ON i.sha256 = f.sha256 "
         f"LEFT JOIN persons p ON p.id = f.person_id WHERE {where} "
-        f"ORDER BY f.det_score DESC, f.id LIMIT ?", (*params, limit)).fetchall()
+        f"ORDER BY f.person_source IS 'manual', p.name, f.det_score DESC, f.id LIMIT ?",
+        (*params, limit)).fetchall()
     return [{'id': r['id'], 'filename': os.path.basename(r['path']), 'path': r['path'],
              'det_score': r['det_score'], 'name': r['name'] or '', 'source': r['person_source'] or '',
              'score': r['person_score'], 'face_url': f"/face/{r['id']}.jpg"} for r in rows]

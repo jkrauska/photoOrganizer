@@ -522,6 +522,9 @@ ARK_HTML = r"""<!doctype html>
   #viewer.open { display: flex; }
   #viewer img { max-width: 95vw; max-height: 88vh; object-fit: contain; background: #222; min-width: 80px; min-height: 80px; }
   #viewer div { color: #ddd; font-size: 13px; }
+  #grid h3 { grid-column: 1 / -1; margin: 12px 0 0; font-size: 14px; color: #444; border-bottom: 1px solid #eee; padding-bottom: 4px; }
+  #grid h3:first-child { margin-top: 0; }
+  #grid h3 small { color: #888; font-weight: 400; }
   #grid figcaption { font-size: 11px; color: #666; text-align: center; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #grid .face-name { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
   #grid .face-name.saved { background: #e8f7ee; border-color: #2a7; }
@@ -654,7 +657,45 @@ async function loadFaces() {
     ? `<button onclick="judge(${JSON.stringify(sugg.map(f => f.id))}, true)">Accept ${sugg.length} suggested name${sugg.length===1?'':'s'}</button>
        <button onclick="judge(${JSON.stringify(sugg.map(f => f.id))}, false)">Reject all suggestions</button>` : '';
   renderForgetRow();
-  document.getElementById('grid').innerHTML = faces.length ? faces.map(f => `
+  // Faces not yet named by hand first, so a cluster's new matches can be checked at a glance
+  // before naming them; the named ones follow, grouped by name (the server sends this order).
+  const todo = faces.filter(f => f.source !== 'manual');
+  const named = faces.filter(f => f.source === 'manual');
+  const c = clusters.find(x => x.id === currentId);
+  const more = c && c.count > faces.length ? ` <small>· showing ${faces.length} of ${c.count}</small>` : '';
+  const heading = (text, note = '') => `<h3>${text}${note}</h3>`;
+  let lastName = null;
+  const groups = [];
+  if (todo.length) {
+    groups.push(heading(`Not yet named · ${todo.length}`,
+      ` <small>check these all match before naming the cluster</small>${more}`));
+    groups.push(...todo.map(figureHtml));
+  }
+  for (const f of named) {
+    if (f.name !== lastName) {
+      lastName = f.name;
+      groups.push(heading(`${escapeHtml(f.name)} · ${named.filter(x => x.name === f.name).length}`,
+                          todo.length ? '' : more));
+    }
+    groups.push(figureHtml(f));
+  }
+  document.getElementById('grid').innerHTML = faces.length ? groups.join('') : '<div class="empty">No faces.</div>';
+  const inputs = [...document.querySelectorAll('#grid .face-name')];
+  inputs.forEach((inp, k) => {
+    inp.dataset.prev = inp.value.trim();
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        saveFaceLabel(inp);
+        inputs[k + 1]?.focus();
+      }
+    });
+    inp.addEventListener('blur', () => saveFaceLabel(inp));
+  });
+}
+
+function figureHtml(f) {
+  return `
     <figure data-id="${f.id}">
       <button class="forget" title="Forget this face (delete it)" onclick="forget([${f.id}])">✕</button>
       <img src="${f.face_url}" loading="lazy" title="Click to select · ${escapeHtml(f.path)}" onclick="toggleSelect(this)" ondblclick="openViewer(${f.id})">
@@ -664,18 +705,7 @@ async function loadFaces() {
         <button title="Reject" onclick="judge([${f.id}], false)">✗</button></div>` : ''}
       <input class="face-name ${f.source==='manual'?'saved':''}" list="persons" data-id="${f.id}"
              value="${f.source==='manual' ? escapeHtml(f.name) : ''}" placeholder="name…">
-    </figure>`).join('') : '<div class="empty">No faces.</div>';
-  document.querySelectorAll('#grid .face-name').forEach(inp => {
-    inp.dataset.prev = inp.value.trim();
-    inp.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        saveFaceLabel(inp);
-        inp.parentElement.nextElementSibling?.querySelector('.face-name')?.focus();
-      }
-    });
-    inp.addEventListener('blur', () => saveFaceLabel(inp));
-  });
+    </figure>`;
 }
 
 let viewerId = null;
