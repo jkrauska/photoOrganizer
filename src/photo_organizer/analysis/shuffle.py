@@ -6,8 +6,9 @@ Then:  http://127.0.0.1:8080/
 A random day folder, then a random stored photo in it (catalog files with status 'done', no
 videos), fades in with a slow pan/zoom. Space plays/pauses, ← → step back through the history and
 forward, 1–5 score the photo on screen and move on to the next one, 0 clears its score, + / -
-change the pace, F goes full screen. One-star photos are never shown again. The bottom overlay
-shows when the photo was taken and Gemma's caption from analysis.db when there is one.
+change the pace, F goes full screen. The year bar under the nav bar (shown with the cursor) has
+two thumbs to narrow the walk to a span of years. One-star photos are never shown again. The
+bottom overlay shows when the photo was taken and Gemma's caption from analysis.db when there is one.
 
 Scores are kept in analysis.db, table photo_scores (one row per sha256; a new score replaces the
 old one), e.g. the photos to clean out:
@@ -20,6 +21,7 @@ import io
 import json
 import os
 import random
+import re
 import socket
 import sqlite3
 import time
@@ -86,6 +88,20 @@ def photo_days(catalog):
     """Sorted day folders that hold at least one stored photo."""
     return sorted({os.path.dirname(path) for (path,) in catalog.execute(
         "SELECT dest_path FROM files WHERE status = 'done' AND sha256 IS NOT NULL") if _is_photo(path)})
+
+
+def day_year(day):
+    """The year of a YYYY/MM/YYYY-MM-DD day folder, or None."""
+    m = re.match(r'(\d{4})-\d\d-\d\d', os.path.basename(day))
+    return int(m.group(1)) if m else None
+
+
+def in_years(days, start=None, end=None):
+    """The day folders (a list, or a dict keyed by them) from year start through end."""
+    if start is None and end is None:
+        return days
+    keep = lambda d: (y := day_year(d)) is not None and (start is None or y >= start) and (end is None or y <= end)
+    return {d: v for d, v in days.items() if keep(d)} if isinstance(days, dict) else [d for d in days if keep(d)]
 
 
 def random_photo(catalog, days, rng=random, skip=frozenset()):
@@ -185,21 +201,29 @@ def make_app(catalog_path, analysis_path, cache_dir, rng=random):
         with closing(connect_ro(analysis_path)) as analysis:
             return persons(analysis)
 
+    @app.get("/api/years")
+    def api_years():
+        """[first, last] year with stored photos."""
+        with closing(connect_ro(catalog_path)) as catalog:
+            ys = [y for y in map(day_year, day_list(catalog)) if y]
+        return [min(ys), max(ys)] if ys else []
+
     @app.get("/api/random")
-    def api_random(person: int | None = None):
-        """A random stored photo; with person, one with that person's face in it."""
+    def api_random(person: int | None = None, start: int | None = None, end: int | None = None):
+        """A random stored photo; with person, one with that person's face in it; with start/end,
+        one from those years (inclusive)."""
         with closing(connect_ro(catalog_path)) as catalog, closing(connect_ro(analysis_path)) as analysis:
             hidden = {r[0] for r in analysis.execute(       # one star: never shown again
                 "SELECT sha256 FROM photo_scores WHERE score <= ?", (HIDE_SCORE,))}
             if person is None:
-                folders = day_list(catalog)
+                folders = in_years(day_list(catalog), start, end)
                 pick = lambda: random_photo(catalog, folders, rng, hidden)
             else:
-                folders = person_days(analysis, person, hidden)
+                folders = in_years(person_days(analysis, person, hidden), start, end)
                 pick = lambda: random_person_photo(catalog, folders, rng)
             if not folders:
-                raise HTTPException(404, "no stored photos of this person" if person is not None
-                                    else "no stored photos in the catalog")
+                raise HTTPException(404, ("no stored photos of this person" if person is not None
+                                          else "no stored photos") + (" in those years" if start or end else ""))
             fresh = len(folders) > 2 * len(recent)
             for _ in range(20):         # skip catalog rows whose file isn't there (store offline, moved)
                 hit = pick()
@@ -297,12 +321,40 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   #who { position: fixed; top: 4px; right: 12px; z-index: 1001; display: none; font: 13px inherit;
          padding: 4px 8px; border-radius: 6px; border: 1px solid #555; background: #222; color: #eee; cursor: pointer; }
   body.cursor #who, #who.set { display: block; }
+  /* Year range: two thumbs on one track, under the nav bar; shows with the cursor, or as a
+     small label while it narrows the years. */
+  #years { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 1001;
+           display: none; align-items: center; gap: 10px; padding: 5px 14px; border-radius: 16px;
+           background: rgba(0,0,0,.55); font-size: 13px; color: #ddd; font-variant-numeric: tabular-nums; }
+  body.cursor #years, #years.set { display: flex; }
+  #years .dual, #years .end { display: none; }
+  body.cursor #years .dual, body.cursor #years .end { display: block; }
+  body.cursor #years #yspan { display: none; }
+  #years .end { width: 2.6em; text-align: center; }
+  .dual { position: relative; width: min(420px, 60vw); height: 22px; }
+  .dual::before, .dual .fill { content: ''; position: absolute; top: 10px; height: 3px; border-radius: 2px; }
+  .dual::before { left: 0; right: 0; background: #555; }
+  .dual .fill { background: #2f6fde; }
+  .dual input { position: absolute; inset: 0; width: 100%; height: 22px; margin: 0; background: none;
+                pointer-events: none; -webkit-appearance: none; appearance: none; }
+  .dual input::-webkit-slider-runnable-track { background: none; }
+  .dual input::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; width: 16px; height: 16px;
+                                      border-radius: 50%; background: #fff; border: 2px solid #2f6fde; cursor: grab; }
+  .dual input::-moz-range-thumb { pointer-events: auto; width: 13px; height: 13px; border-radius: 50%;
+                                  background: #fff; border: 2px solid #2f6fde; cursor: grab; }
+  /* Keeps its room while hidden, so the bar doesn't shift under a thumb being dragged. */
+  #yreset { color: #8ab4ff; cursor: pointer; white-space: nowrap; visibility: hidden; }
+  #years.set #yreset { visibility: visible; }
   kbd { border: 1px solid #555; border-radius: 3px; padding: 0 4px; color: #ccc; }
 </style></head><body>
 <div class="slide" id="s0"><div class="bg"></div><img alt=""></div>
 <div class="slide" id="s1"><div class="bg"></div><img alt=""></div>
 <div id="info"><div id="date"></div><div id="cap"></div><div id="meta"></div></div>
 <select id="who" title="Only photos with this person in them"><option value="">Everyone</option></select>
+<div id="years" title="Only photos from these years"><span class="end" id="ylo"></span>
+<div class="dual"><div class="fill"></div><input type="range" id="y0" aria-label="First year">
+<input type="range" id="y1" aria-label="Last year"></div><span class="end" id="yhi"></span>
+<span id="yspan"></span><span id="yreset">All years</span></div>
 <div id="badge"></div><div id="flash"></div><div id="state"></div>
 <div id="help"><kbd>space</kbd> play / pause &nbsp; <kbd>←</kbd> <kbd>→</kbd> back / next<br>
 <kbd>1</kbd>–<kbd>5</kbd> score &nbsp; <kbd>0</kbd> clear score &nbsp; <kbd>+</kbd> <kbd>-</kbd> pace &nbsp;
@@ -316,13 +368,18 @@ let history = [], at = -1;             // photos shown; at = the one on screen
 const ahead = [];                      // prefetched random photos, decoded and ready
 let person = '';                       // persons.id to show only photos of, '' for everyone
 try { person = localStorage.getItem('shuffle-person') || ''; } catch (_) {}
-let gen = 0;                           // bumped when the person changes: older prefetches are dropped
+let years = null;                      // [first, last] year to show, null for all of them
+try { years = JSON.parse(localStorage.getItem('shuffle-years') || 'null'); } catch (_) {}
+let gen = 0;                           // bumped when the person or years change: older prefetches are dropped
 let front = 0, anim = null, busy = false, queued = 0;   // queued: arrow presses made while loading
 let autoAt = 0, outgoing = null;   // when the timer last changed photo, and the photo it faded out
 
 async function fetchRandom() {
   for (let i = 0; i < 5; i++) {
-    const r = await fetch('api/random' + (person ? '?person=' + person : ''));
+    const q = new URLSearchParams();
+    if (person) q.set('person', person);
+    if (years) { q.set('start', years[0]); q.set('end', years[1]); }
+    const r = await fetch('api/random' + (q.toString() ? '?' + q : ''));
     if (!r.ok) { await new Promise(ok => setTimeout(ok, 1500)); continue; }
     const p = await r.json();
     if (await preload(p)) return p;
@@ -485,8 +542,50 @@ $('#who').addEventListener('change', e => {
   step(1); fill();
 });
 
+let yearSpan = null;                   // [first, last] year in the store
+async function loadYears() {
+  try { yearSpan = await (await fetch('api/years')).json(); } catch (_) {}
+  if (!yearSpan || yearSpan.length != 2) { yearSpan = null; years = null; return; }
+  const [lo, hi] = yearSpan;
+  if (years) years = [Math.max(lo, Math.min(years[0], hi)), Math.max(lo, Math.min(years[1], hi))];
+  if (years && years[0] <= lo && years[1] >= hi) years = null;
+  for (const el of [$('#y0'), $('#y1')]) { el.min = lo; el.max = hi; el.step = 1; }
+  $('#y0').value = years ? years[0] : lo; $('#y1').value = years ? years[1] : hi;
+  drawYears();
+}
+function drawYears() {
+  const [lo, hi] = yearSpan, a = +$('#y0').value, b = +$('#y1').value;
+  const pct = y => (hi > lo ? (y - lo) / (hi - lo) : 0) * 100;
+  // The thumbs are 16px wide and stop 8px short of each end of the track.
+  const fill = $('.dual .fill');
+  fill.style.left = `calc(${pct(a)}% + ${8 - pct(a) * .16}px)`;
+  fill.style.right = `calc(${100 - pct(b)}% - ${8 - pct(b) * .16}px)`;
+  $('#ylo').textContent = a; $('#yhi').textContent = b;
+  $('#yspan').textContent = a == b ? a : `${a} – ${b}`;
+  $('#years').classList.toggle('set', a > lo || b < hi);
+}
+function yearsInput(e) {
+  // A thumb can't pass the other one: it pushes it along.
+  const y0 = $('#y0'), y1 = $('#y1');
+  if (+y0.value > +y1.value) (e.target === y0 ? y1 : y0).value = e.target.value;
+  drawYears();
+}
+function yearsChosen() {
+  const [lo, hi] = yearSpan, a = +$('#y0').value, b = +$('#y1').value;
+  const next = a > lo || b < hi ? [a, b] : null;
+  document.activeElement && document.activeElement.blur();   // arrow keys go back to the slideshow
+  if (JSON.stringify(next) == JSON.stringify(years)) return;
+  years = next;
+  try { localStorage.setItem('shuffle-years', JSON.stringify(years)); } catch (_) {}
+  gen++; ahead.length = 0;
+  status(years ? (a == b ? `${a}` : `${a} – ${b}`) : 'All years');
+  step(1); fill();
+}
+for (const el of [$('#y0'), $('#y1')]) { el.addEventListener('input', yearsInput); el.addEventListener('change', yearsChosen); }
+$('#yreset').addEventListener('click', () => { $('#y0').value = yearSpan[0]; $('#y1').value = yearSpan[1]; drawYears(); yearsChosen(); });
+
 document.addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey || e.target.id == 'who') return;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target.id == 'who' || e.target.closest?.('#years')) return;
   if (e.key == ' ') { e.preventDefault(); toggle(); }
   else if (e.key == 'ArrowRight') { e.preventDefault(); step(1); }
   else if (e.key == 'ArrowLeft') { e.preventDefault(); step(-1); }
@@ -506,9 +605,9 @@ document.addEventListener('mousemove', () => {
   document.body.classList.add('cursor');
   clearTimeout(idle); idle = setTimeout(() => document.body.classList.remove('cursor'), 2500);
 });
-document.addEventListener('click', e => { if (e.target.closest('#help, #who')) return; e.clientX < innerWidth / 3 ? step(-1) : step(1); });
+document.addEventListener('click', e => { if (e.target.closest('#help, #who, #years')) return; e.clientX < innerWidth / 3 ? step(-1) : step(1); });
 
-(async () => { status('Loading…', true); await loadPersons(); await step(1); fill(); })();
+(async () => { status('Loading…', true); await Promise.all([loadPersons(), loadYears()]); await step(1); fill(); })();
 </script></body></html>"""
 
 

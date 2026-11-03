@@ -57,6 +57,10 @@ def test_shuffle_serves_random_stored_photos_with_captions_and_keeps_scores(tmp_
     assert client.get('/api/photo/h1').json()['score'] is None
     assert client.post('/api/score', json={'sha': 'h1', 'score': 1}).status_code == 200
     assert client.get('/api/random').status_code == 503      # the only photo is one-star
+    assert client.post('/api/score', json={'sha': 'h1', 'score': 3}).status_code == 200
+    assert client.get('/api/years').json() == [2010, 2010]
+    assert client.get('/api/random', params={'start': 2010, 'end': 2010}).json()['sha'] == 'h1'
+    assert client.get('/api/random', params={'start': 2011}).status_code == 404
 
 
 def test_shuffle_picks_the_day_first_so_bursts_dont_crowd_out_other_days(tmp_path):
@@ -117,3 +121,13 @@ def test_shuffle_can_show_only_photos_of_one_person(tmp_path):
     assert {client.get('/api/random?person=2').json()['sha'] for _ in range(30)} == {'bobjpg', 'bothjpg'}
     assert client.get('/api/random?person=3').status_code == 404
     assert 'nobodyjpg' in {client.get('/api/random').json()['sha'] for _ in range(40)}
+
+
+def test_shuffle_year_range_narrows_the_days(tmp_path):
+    from photo_organizer.analysis.shuffle import day_year, in_years
+    days = ['/ark/1999/12/1999-12-31', '/ark/2005/06/2005-06-01', '/ark/2012/01/2012-01-01', '/ark/misc']
+    assert day_year(days[1]) == 2005 and day_year(days[3]) is None
+    assert in_years(days) == days
+    assert in_years(days, 2000, 2012) == days[1:3]
+    assert in_years(days, end=2005) == days[:2]
+    assert in_years({d: [d] for d in days}, 2006) == {days[2]: [days[2]]}
