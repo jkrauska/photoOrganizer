@@ -269,6 +269,7 @@ button.open { font:inherit; font-size:13px; padding:4px 10px; border-radius:8px;
 <main id="list"></main>
 <div id="viewer"><img id="vimg" alt=""><p id="vcap"></p>
   <div class="bar"><button class="open" id="vreveal">Show in Finder</button>
+  <button class="open" id="vscore" title="Or double-click the photo">Score in Shuffle</button>
   <button class="open" id="vclose">Close (Esc) · ← → step</button></div></div>
 <script>
 const $ = s => document.querySelector(s);
@@ -350,7 +351,16 @@ document.addEventListener('click', e => {
   else if (t.dataset.q) { $('#q').value = t.dataset.q; load(true); window.scrollTo(0, 0); }
   else if (t.dataset.sha) show(t);
   else if (t.id == 'vreveal') openIn(viewing.dataset.day, viewing.dataset.sha);
+  else if (t.id == 'vscore') scoreInShuffle(viewing.dataset.sha);
   else if (t.id == 'vclose' || t.id == 'viewer') $('#viewer').style.display = 'none';
+});
+// Double-clicking a photo (its thumbnail, or in the viewer the first click opened) opens it on the
+// shuffle page, where 1-5 score it. The shuffle page sits next to this one under photo-ui.
+function scoreInShuffle(sha) { location.href = '../shuffle/?sha=' + encodeURIComponent(sha); }
+document.addEventListener('dblclick', e => {
+  const t = e.target;
+  if (t.dataset?.sha) scoreInShuffle(t.dataset.sha);
+  else if ((t.id == 'vimg' || t.id == 'viewer') && viewing) scoreInShuffle(viewing.dataset.sha);
 });
 // The viewer steps through every sample photo on the page with the arrow keys, across days.
 function show(img) {

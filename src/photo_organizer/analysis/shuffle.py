@@ -607,7 +607,27 @@ document.addEventListener('mousemove', () => {
 });
 document.addEventListener('click', e => { if (e.target.closest('#help, #who, #years')) return; e.clientX < innerWidth / 3 ? step(-1) : step(1); });
 
-(async () => { status('Loading…', true); await Promise.all([loadPersons(), loadYears()]); await step(1); fill(); })();
+// ?sha=… (the days page links here) opens on that photo, paused so it can be scored; scoring
+// moves on into the random walk as usual.
+async function openShared(sha) {
+  window.history.replaceState(null, '', location.pathname);   // a reload starts a plain walk
+  const r = await fetch('api/photo/' + encodeURIComponent(sha));
+  if (!r.ok) return false;
+  const p = await r.json();
+  if (!(await preload(p))) return false;
+  history.push(p); at = history.length - 1;
+  playing = false;
+  show(p); anim && anim.pause(); left = pace;
+  status('❚❚ Paused — 1–5 to score, space to play', true);
+  return true;
+}
+(async () => {
+  status('Loading…', true);
+  await Promise.all([loadPersons(), loadYears()]);
+  const sha = new URLSearchParams(location.search).get('sha');
+  if (!(sha && await openShared(sha))) await step(1);
+  fill();
+})();
 </script></body></html>"""
 
 
