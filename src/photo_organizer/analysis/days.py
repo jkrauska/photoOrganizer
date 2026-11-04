@@ -14,6 +14,10 @@ captions agree on.
 
 Context the person adds to a day (set_context, the text box in the day browser) goes into every
 summary of that day. Adding or changing it requeues the day, redone from the same sample frames.
+
+When none of a day's sample frames can be read for an OS-level reason (the NAS dropped or timed
+out), nothing is written for that day: the run waits, doubling the wait each time from a minute
+up to half an hour, and tries the same day again, giving up on it after RETRIES tries.
 """
 
 import json
@@ -26,6 +30,12 @@ from datetime import datetime
 
 from photo_organizer.analysis.ark import _list_json, _store_root, analyze_one
 from photo_organizer.constants import PHOTO_EXTENSIONS
+
+RETRIES, BACKOFF, BACKOFF_MAX = 8, 60, 1800     # tries per day, first and longest wait (s)
+
+
+class StoreUnreadable(Exception):
+    """None of a day's sample frames could be read from the store (no summary is written)."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS days (
@@ -223,6 +233,12 @@ def summarize_day(conn, day, items, vlm_fn, summary_fn, vlm_name=None, gap_minut
     for b, idx in zip(bursts, samples):
         for j in idx:
             analyze_one(conn, b[j][0], b[j][1], None, vlm_fn, vlm_name, tmpdir)
+    shas = [b[j][0] for b, idx in zip(bursts, samples) for j in idx]
+    rows = [conn.execute("SELECT caption, error FROM images WHERE sha256 = ?", (sha,)).fetchone()
+            for sha in shas]
+    if rows and not any(r and r['caption'] for r in rows) and any(
+            r and (r['error'] or '').startswith('load: [Errno') for r in rows):
+        raise StoreUnreadable(next(r['error'] for r in rows if r and r['error']))
     context = get_context(conn, day)    # read before the model runs: a later edit requeues the day
     prompt, people = day_prompt(conn, day, items, bursts, samples, rejected, note, context)
     r = summary_fn(prompt)
@@ -258,11 +274,12 @@ def _redo_next(conn, days):
 
 
 def run_days(conn, days, vlm_fn, summary_fn, vlm_name=None, seed=None, limit=0, min_photos=2, log=print,
-             refresh=None, refresh_every=1800, **kw):
+             refresh=None, refresh_every=1800, sleep=time.sleep, **kw):
     """Summarize days not yet summarized, in random order; days marked wrong go first, and are
     checked for before every day, so marking one in the browser takes effect within a day's time.
     refresh() returns the store's days again (select_days); new day folders the organizer has added
-    since are shuffled into what's left, every refresh_every seconds."""
+    since are shuffled into what's left, every refresh_every seconds. A day whose frames can't be
+    read (StoreUnreadable) is retried after a growing wait instead of being summarized blind."""
     init(conn)
     days = {d: items for d, items in days.items() if len(items) >= min_photos}   # one photo: no day to sum up
     done = {r[0] for r in conn.execute("SELECT day FROM days WHERE summarized_at IS NOT NULL")}
@@ -273,6 +290,7 @@ def run_days(conn, days, vlm_fn, summary_fn, vlm_name=None, seed=None, limit=0, 
     log(f"{len(days):,} days, {len(done & set(days)):,} already summarized, {len(todo):,} to do (random order)")
     start, n, failed = time.time(), 0, set()
     rng, refreshed = random.Random(seed), time.time()
+    tries, wait = {}, BACKOFF
     with tempfile.TemporaryDirectory(prefix='ark-days-') as tmpdir:
         while True:
             if refresh and not limit and time.time() - refreshed >= refresh_every:
@@ -308,11 +326,26 @@ def run_days(conn, days, vlm_fn, summary_fn, vlm_name=None, seed=None, limit=0, 
             try:
                 nb, ns, r = summarize_day(conn, day, days[day], vlm_fn, summary_fn, vlm_name,
                                           tmpdir=tmpdir, log=log, **extra, **kw)
+            except StoreUnreadable as e:
+                conn.rollback()
+                n -= 1
+                tries[day] = tries.get(day, 0) + 1
+                if tries[day] >= RETRIES:
+                    failed.add(day)
+                    log(f"GIVING UP on {day} after {RETRIES} tries: {e}")
+                    continue
+                if not redo:
+                    todo.insert(0, day)
+                log(f"store unreadable ({e}); retrying {os.path.basename(day)} in {wait}s")
+                sleep(wait)
+                wait = min(wait * 2, BACKOFF_MAX)
+                continue
             except Exception as e:
                 conn.rollback()
                 failed.add(day)
                 log(f"[{n}] ERROR {day}: {type(e).__name__}: {e}")
                 continue
+            wait = BACKOFF
             per = (time.time() - start) / n
             log(f"[{n}, {len(todo)} left] {os.path.basename(day)}{('  REDO #' + str(extra['attempt']) if kind == 'wrong' else '  NEW CONTEXT') if redo else ''}"
                 f"  {len(days[day])} photos, {nb} bursts, {ns} sampled  {time.time() - t:.0f}s"

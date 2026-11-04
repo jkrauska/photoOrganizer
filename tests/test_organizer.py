@@ -914,6 +914,44 @@ def test_ark_days_summarize_random_days_once_from_sampled_captions(tmp_path):
     assert len(captioned) == 4
 
 
+def test_ark_days_wait_and_retry_while_the_store_is_unreadable(tmp_path, monkeypatch):
+    from photo_organizer.analysis import ark, days
+    store = tmp_path / 'store' / '2010' / '06' / '2010-06-05'
+    store.mkdir(parents=True)
+    found = {str(store): []}
+    for i in range(3):
+        p = store / f'{i}.jpg'
+        Image.new('RGB', (8, 8)).save(p)
+        found[str(store)].append((f'h{i}', str(p), datetime.datetime(2010, 6, 5, 10 + i)))
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    real, down = ark.load_image, [2]
+
+    def load(path):
+        if down[0]:
+            raise OSError(60, 'Operation timed out', path)
+        return real(path)
+
+    def wait(s):
+        waits.append(s)
+        down[0] -= 1
+    monkeypatch.setattr(ark, 'load_image', load)
+    waits, summaries = [], []
+    vlm = lambda path: {'caption': 'a beach'}
+    summary = lambda prompt: summaries.append(prompt) or {'title': 'Beach day'}
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None, sleep=wait) == 1
+    assert waits == [60, 120], "no summary while unreadable; the wait doubles"
+    assert len(summaries) == 1 and 'a beach' in summaries[0]
+    assert conn.execute("SELECT title FROM days").fetchone()[0] == 'Beach day'
+
+    down[0] = 99                    # never comes back: give up on the day without a summary
+    conn.execute("DELETE FROM days")
+    conn.execute("UPDATE images SET caption = NULL, vlm_at = NULL")
+    waits.clear()
+    assert days.run_days(conn, found, vlm, summary, log=lambda s: None, sleep=wait) == 0
+    assert len(waits) == days.RETRIES - 1 and max(waits) == days.BACKOFF_MAX
+    assert conn.execute("SELECT COUNT(*) FROM days").fetchone()[0] == 0
+
+
 def test_ark_spread_order_takes_a_few_images_from_every_year_per_round(tmp_path):
     from photo_organizer.analysis.ark import select_images, spread_order
     rows = [(f'/store/{y}/01/{y}-01-01/{i}.jpg', f'{y}-{i}', 'done')
