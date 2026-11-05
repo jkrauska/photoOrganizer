@@ -36,6 +36,7 @@ from photo_organizer.db import DEFAULT_DB_PATH
 
 OUT_ROOT = '~/.photo-organizer/timelapse'
 PER_MONTH = 8                   # candidates tried per month at most
+HOLD, STEPS = 6, 24             # frames (at 30 fps) each month is held, then morphs into the next: 1 s a month
 KEEP_VERSIONS = 3               # earlier videos kept in versions/ when a new one is rendered
 MORE = 8                        # faces looked at per "Look for more"
 MAX_YAW, MAX_PITCH = 20, 20     # degrees; a pick must look about at the camera
@@ -326,7 +327,7 @@ def _segment(job):
     return out
 
 
-def render(specs, out_path, fps=30, hold=4, steps=16, log=print, workers=None):
+def render(specs, out_path, fps=30, hold=HOLD, steps=STEPS, log=print, workers=None):
     """MP4 of the picks [{'label', 'path', 'm'}]: each held `hold` frames, then morphed into the
     next over `steps` frames (a crossfade when either has no landmarks). The frames are aligned
     and the months' clips rendered by a pool of processes; ffmpeg then joins the clips as they are."""
