@@ -634,8 +634,9 @@ main { padding:0 16px 40px; display:grid; gap:12px; grid-template-columns:repeat
   <button class="primary" id="rebuild">Rebuild video</button><span id="status"></span></header>
 <div id="top"><video id="video" controls loop muted playsinline></video>
   <div id="help">Each month shows the original photo chosen for it, and below it the faces that were
-  looked at (green outline: the pick; faded: not facing the camera, too small or soft). Click one
-  to use it instead, then Rebuild video. Click a photo to see it large; Esc closes.</div></div>
+  looked at (green outline: the pick; faded: turned, too small, eyes shut or soft). Click one to
+  use it instead, Look for more to check more photos from that month, or Remove this month to
+  leave it out; then Rebuild video. Click a photo to see it large; Esc closes.</div></div>
 <main id="list"></main>
 <div id="viewer" onclick="this.style.display='none'"><img id="vimg"><p id="vcap"></p></div>
 <script>
@@ -669,9 +670,10 @@ function card(m) {
   const when = pick && pick.taken ? pick.taken.slice(0, 10) : '';
   const head = `<h3>${esc(m.month)} <small>${esc(when)}${pick ? ' · ' + esc(pick.file) : ''}${m.chosen_by === 'you' ? ' · your pick' : ''}</small></h3>
     <div class="acts">${pick ? `<button onclick="notPerson('${m.month}', ${pick.id})">Not ${esc(data.person.split(' ')[0])}</button>` : ''}
-      <button onclick="skipMonth('${m.month}', ${!m.skipped})">${m.skipped ? 'Use this month' : 'Skip month'}</button>
+      <button onclick="skipMonth('${m.month}', ${!m.skipped})">${m.skipped ? 'Use this month' : 'Remove this month'}</button>
       ${m.more && !m.skipped ? `<button onclick="lookMore(this, '${m.month}')">Look for more (${m.more} left)</button>` : ''}</div>`;
-  if (m.skipped) return `<div class="month skipped">${head}<div class="none">left out of the video</div></div>`;
+  if (m.skipped) return `<div class="month skipped"><h3>${esc(m.month)} <small>removed: left out of the video</small></h3>
+    <div class="acts"><button onclick="skipMonth('${m.month}', false)">Use this month</button></div></div>`;
   const orig = pick ? `<img class="orig" loading="lazy" src="photo/${pick.id}.jpg" data-id="${pick.id}"
       data-cap="${esc(m.month)} · ${esc(pick.file)}" onclick="view(this)">` : '<div class="none">no usable photo</div>';
   const alts = m.faces.filter(f => f.measured).map(f => `<figure><img loading="lazy" src="aligned/${current}/${f.id}.jpg"
@@ -703,7 +705,8 @@ async function act(url, body, msg) {
   $('#status').textContent = msg;
   const y = window.scrollY; await load(current); window.scrollTo(0, y);
 }
-const skipMonth = (month, skip) => act(`api/t/${current}/skip`, {month, skip}, 'Changed; Rebuild video to see it');
+const skipMonth = (month, skip) => act(`api/t/${current}/skip`, {month, skip},
+  (skip ? `${month} removed` : `${month} back in`) + '; Rebuild video to see it');
 const notPerson = (month, face_id) => confirm(`Take the name ${data.person} off this face?`) &&
   act(`api/t/${current}/not_person`, {month, face_id}, 'Name removed; Rebuild video picks another photo for that month');
 
