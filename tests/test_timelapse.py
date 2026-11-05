@@ -82,6 +82,10 @@ def test_timelapse_page_lists_months_and_saves_a_pick(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM face_not_person WHERE face_id = 2").fetchone()[0] == 1
     assert client.get('/api/t/kid').json()['months'][0]['pick'] is None, "re-picked on the next rebuild"
     assert client.post('/api/t/kid/not_person', json={'month': '2019-01', 'face_id': 2}).status_code == 404
+    assert client.post('/api/t/kid/born', json={'born': '2018-07'}).status_code == 200
+    got = client.get('/api/t/kid').json()
+    assert got['born'] == '2018-07' and got['months'][0]['age'] == '6m'
+    assert client.post('/api/t/kid/born', json={'born': 'July'}).status_code == 400
     assert client.get('/api/t/nobody').status_code == 404
     assert client.get('/api/t/..%2Fx').status_code == 404
 
@@ -98,3 +102,13 @@ def test_eye_opening_tells_open_eyes_from_shut_ones():
     m = {'yaw': 0, 'pitch': 0, 'eye_px': 90, 'sharp': 200}
     assert t.decent(dict(m, lm=face(3))) and not t.decent(dict(m, lm=face(1)))
     assert t.decent(m), "measured before landmarks were kept: not held against it"
+
+
+def test_age_label_counts_months_from_the_birth_month():
+    assert t.age_label('2012-01', '2012-01') == 'newborn'
+    assert t.age_label('2012-04', '2012-01') == '3m'
+    assert t.age_label('2013-01', '2012-01') == '1y'
+    assert t.age_label('2013-03', '2012-01') == '1y 2m'
+    assert t.age_label('2026-11', '2012-01') == '14y 10m'
+    assert t.age_label('2011-12', '2012-01') == '2011-12', "before the birth month: the date"
+    assert t.age_label('2013-03', None) == '2013-03'

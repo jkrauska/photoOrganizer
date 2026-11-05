@@ -256,6 +256,20 @@ def morph(img1, img2, p1, p2, tris, t):
     return np.clip((1 - t) * w1 + t * w2, 0, 255).astype(np.uint8)
 
 
+def age_label(month, born):
+    """'YYYY-MM' as an age from the birth month 'YYYY-MM': newborn, 3m, 1y, 1y 2m, ...; the month
+    itself when there's no birth month (or the photo is from before it)."""
+    if not born:
+        return month
+    n = (int(month[:4]) - int(born[:4])) * 12 + int(month[5:7]) - int(born[5:7])
+    if n < 0:
+        return month
+    if n == 0:
+        return 'newborn'
+    y, m = divmod(n, 12)
+    return f"{m}m" if not y else (f"{y}y" if not m else f"{y}y {m}m")
+
+
 def _label(img, text):
     H = img.shape[0]
     for color, thick in (((0, 0, 0), 6), ((255, 255, 255), 2)):
@@ -347,7 +361,7 @@ def build(db_path, person, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH, per_
 
     picks_path = out_dir / 'picks.json'
     saved = json.loads(picks_path.read_text()) if picks_path.exists() else {}
-    overrides, skip = saved.get('overrides', {}), saved.get('skip', [])
+    overrides, skip, born = saved.get('overrides', {}), saved.get('skip', []), saved.get('born')
     picks, frames = {}, []
     for month, cands in months.items():
         if month in skip:
@@ -365,10 +379,10 @@ def build(db_path, person, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH, per_
             model = model or PoseModel()
             c['m'] = cache[str(c['id'])] = measure(model, c) or c['m']
         picks[month] = c['id']
-        frames.append((month, aligned(c), morph_points(c)))
+        frames.append((age_label(month, born), aligned(c), morph_points(c)))
     cache_path.write_text(json.dumps(cache))
-    picks_path.write_text(json.dumps({'person': person, 'picks': picks, 'overrides': overrides, 'skip': skip},
-                                     indent=1))
+    picks_path.write_text(json.dumps({'person': person, 'born': born, 'picks': picks, 'overrides': overrides,
+                                      'skip': skip}, indent=1))
     video = out_dir / f"{slug(person)}.mp4"
     render(frames, video, log=log)
     review_sheet(out_dir, person, months, picks)
@@ -382,6 +396,7 @@ def months_summary(db_path, out_dir, catalog_path=DEFAULT_DB_PATH):
     cache = json.loads((out_dir / 'candidates.json').read_text())
     person, picks, overrides = data.get('person'), data.get('picks', {}), data.get('overrides', {})
     skip = set(data.get('skip', []))
+    born = data.get('born')
     with closing(ark_faces.connect(db_path)) as conn:
         if not person:                                  # picks.json from before 'person' was kept
             person = next((n for n in ark_faces.persons(conn) if slug(n) == out_dir.name), out_dir.name)
@@ -398,7 +413,7 @@ def months_summary(db_path, out_dir, catalog_path=DEFAULT_DB_PATH):
                           **({k: round(m[k]) for k in ('yaw', 'pitch', 'sharp', 'eye_px')} if m else {}),
                           'eyes': round(eyes(m), 2) if eyes(m) is not None else None})
         left = sum(1 for c in cands if str(c['id']) not in cache)
-        out.append({'month': month, 'more': left, 'pick': None if month in skip else picks.get(month), 'faces': faces,
+        out.append({'month': month, 'age': age_label(month, born) if born else '', 'more': left, 'pick': None if month in skip else picks.get(month), 'faces': faces,
                     'chosen_by': 'you' if month in overrides else 'auto', 'skipped': month in skip})
     return person, out
 
@@ -456,7 +471,8 @@ def make_app(db_path, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH):
         d = folder(name)
         person, months = months_summary(db_path, d, catalog_path)
         v = d / f'{name}.mp4'
-        return {'person': person, 'months': months, 'job': jobs.get(name),
+        born = json.loads((d / 'picks.json').read_text()).get('born')
+        return {'person': person, 'born': born, 'months': months, 'job': jobs.get(name),
                 'video_mtime': int(v.stat().st_mtime) if v.exists() else None}
 
     @app.post("/api/t/{name}/pick")
@@ -471,6 +487,19 @@ def make_app(db_path, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH):
             ov[body.month] = body.face_id
             data.setdefault('picks', {})[body.month] = body.face_id
         path.write_text(json.dumps(data, indent=1))
+        return {'ok': True}
+
+    class BornIn(BaseModel):
+        born: str = ''                                  # 'YYYY-MM', or '' for none
+
+    @app.post("/api/t/{name}/born")
+    def set_born(name: str, body: BornIn):
+        if body.born and not re.fullmatch(r'(19|20)\d\d-(0[1-9]|1[0-2])', body.born):
+            raise HTTPException(400, "born is YYYY-MM")
+
+        def fn(data):
+            data['born'] = body.born or None
+        edit(folder(name), fn)
         return {'ok': True}
 
     @app.post("/api/t/{name}/skip")
@@ -604,7 +633,7 @@ body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 -apple-sy
 header { position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line);
   padding:10px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
 header h1 { font-size:17px; margin:0; }
-select, button { font:inherit; padding:5px 10px; border-radius:8px; border:1px solid var(--line);
+select, button, input { font:inherit; padding:5px 10px; border-radius:8px; border:1px solid var(--line);
   background:var(--card); color:var(--ink); cursor:pointer; }
 button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
 #status { color:var(--muted); font-size:13px; }
@@ -631,6 +660,7 @@ main { padding:0 16px 40px; display:grid; gap:12px; grid-template-columns:repeat
 #viewer p { color:#ddd; margin:0; }
 </style></head><body>
 <header><h1>Timelapse</h1><select id="who"></select>
+  <label>Born <input id="born" type="month" title="Frames are labeled with the age at the time"></label>
   <button class="primary" id="rebuild">Rebuild video</button><span id="status"></span></header>
 <div id="top"><video id="video" controls loop muted playsinline></video>
   <div id="help">Each month shows the original photo chosen for it, and below it the faces that were
@@ -657,6 +687,7 @@ async function load(slug) {
   current = slug;
   try { localStorage.setItem('timelapse', slug); } catch (e) {}
   data = await (await fetch(`api/t/${slug}`)).json();
+  $('#born').value = data.born || '';
   if (data.video_mtime) $('#video').src = `video/${slug}.mp4?v=${data.video_mtime}`;
   else $('#video').removeAttribute('src');
   showJob(data.job);
@@ -668,7 +699,7 @@ async function load(slug) {
 function card(m) {
   const pick = m.faces.find(f => f.id === m.pick);
   const when = pick && pick.taken ? pick.taken.slice(0, 10) : '';
-  const head = `<h3>${esc(m.month)} <small>${esc(when)}${pick ? ' · ' + esc(pick.file) : ''}${m.chosen_by === 'you' ? ' · your pick' : ''}</small></h3>
+  const head = `<h3>${m.age ? esc(m.age) + ' <small>' + esc(m.month) + '</small>' : esc(m.month)} <small>${esc(when)}${pick ? ' · ' + esc(pick.file) : ''}${m.chosen_by === 'you' ? ' · your pick' : ''}</small></h3>
     <div class="acts">${pick ? `<button onclick="notPerson('${m.month}', ${pick.id})">Not ${esc(data.person.split(' ')[0])}</button>` : ''}
       <button onclick="skipMonth('${m.month}', ${!m.skipped})">${m.skipped ? 'Use this month' : 'Remove this month'}</button>
       ${m.more && !m.skipped ? `<button onclick="lookMore(this, '${m.month}')">Look for more (${m.more} left)</button>` : ''}</div>`;
@@ -737,6 +768,8 @@ $('#rebuild').onclick = async () => {
   await fetch(`api/t/${current}/rebuild`, {method: 'POST'});
   showJob({state: 'running', log: []}); load(current);
 };
+$('#born').onchange = () => act(`api/t/${current}/born`, {born: $('#born').value},
+  'Birth month saved; Rebuild video to label the frames with ages');
 $('#who').onchange = () => { $('#status').textContent = ''; load($('#who').value); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#viewer').style.display = 'none'; });
 init();
@@ -750,7 +783,13 @@ def main():
     p.add_argument('--catalog', default=DEFAULT_DB_PATH)
     p.add_argument('--out', default=OUT_ROOT)
     p.add_argument('--per-month', type=int, default=PER_MONTH, help='candidates measured per month')
+    p.add_argument('--born', help='birth month YYYY-MM: frames are labeled with the age (kept for later runs)')
     a = p.parse_args()
+    if a.born:
+        pp = Path(a.out).expanduser() / slug(a.person) / 'picks.json'
+        pp.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(pp.read_text()) if pp.exists() else {}
+        pp.write_text(json.dumps(dict(data, born=a.born), indent=1))
     build(os.path.expanduser(a.db), a.person, a.out, os.path.expanduser(a.catalog), a.per_month)
 
 
