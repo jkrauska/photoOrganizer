@@ -6,6 +6,7 @@
   /faces/    name face clusters
   /finder/   photos with all of up to four named people in them
   /shuffle/  random walk through the store, with 1-5 scores
+  /timelapse/  growing-up timelapses: each month's photo, swap picks, rebuild the video
 
   photo-ui [--host 0.0.0.0] [--port 8077]
 """
@@ -24,12 +25,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from photo_organizer import status
-from photo_organizer.analysis import day_browser, face_browser, face_finder, shuffle
+from photo_organizer.analysis import day_browser, face_browser, face_finder, shuffle, timelapse
 from photo_organizer.analysis.ark import DEFAULT_ANALYSIS_DB
 from photo_organizer.db import DEFAULT_DB_PATH
 
 NAV = [('/', 'status', 'Status'), ('/archive', 'archive', 'Archive'), ('/days/', 'days', 'Days'),
-       ('/faces/', 'faces', 'Faces'), ('/finder/', 'finder', 'Face Finder'), ('/shuffle/', 'shuffle', 'Shuffle')]
+       ('/faces/', 'faces', 'Faces'), ('/finder/', 'finder', 'Face Finder'), ('/shuffle/', 'shuffle', 'Shuffle'),
+       ('/timelapse/', 'timelapse', 'Timelapse')]
 NAV_STYLE = """<style>
 #ark-nav { position:fixed; top:0; left:0; right:0; height:36px; z-index:1000; display:flex; align-items:center;
   gap:2px; padding:0 12px; background:#1d1d1f; font:500 13px -apple-system, system-ui, sans-serif;
@@ -67,6 +69,7 @@ def make_app(catalog, analysis_db, port, crops, thumbs, cache):
         'faces': (face_browser.make_ark_app(analysis_db, crops, catalog), face_browser.ARK_HTML, False),
         'finder': (face_finder.make_app(analysis_db, thumbs), face_finder.PAGE, False),
         'shuffle': (shuffle.make_app(catalog, analysis_db, cache), shuffle.PAGE, True),
+        'timelapse': (timelapse.make_app(analysis_db, catalog_path=catalog), timelapse.PAGE, False),
     }
     for key, (sub, page, overlay) in pages.items():
         # Each page's URLs are relative, so it needs the trailing slash to find its API.
