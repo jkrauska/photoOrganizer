@@ -47,6 +47,7 @@ photo-face-browser = "photo_organizer.analysis.face_browser:main"
 photo-ark-analyze = "photo_organizer.analysis.ark:main"
 photo-day-browser = "photo_organizer.analysis.day_browser:main"
 photo-ark-timelapse = "photo_organizer.analysis.timelapse:main"
+photo-ark-screenshots = "photo_organizer.analysis.screenshots:main"
 photo-shuffle = "photo_organizer.analysis.shuffle:main"
 photo-ui = "photo_organizer.ui:main"
 

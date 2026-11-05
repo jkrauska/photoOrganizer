@@ -268,7 +268,12 @@ def analyze_one(conn, sha, path, face_fn=None, vlm_fn=None, vlm_name=None, tmpdi
         conn.execute("UPDATE images SET error = ? WHERE sha256 = ?", (f"load: {e}", sha))
         conn.commit()
         return None
-    faces = face_fn(im) if need_faces else None
+    if need_faces:
+        from photo_organizer.analysis.screenshots import is_screenshot   # (imports this module)
+        # A screenshot's faces are wallpapers, avatars and ads: checked, but none recorded.
+        faces = [] if is_screenshot(path, *im.size) else face_fn(im)
+    else:
+        faces = None
     r = None
     if need_vlm:
         small = im.copy()
