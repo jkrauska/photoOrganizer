@@ -36,6 +36,7 @@ from photo_organizer.db import DEFAULT_DB_PATH
 
 OUT_ROOT = '~/.photo-organizer/timelapse'
 PER_MONTH = 8                   # candidates tried per month at most
+KEEP_VERSIONS = 3               # earlier videos kept in versions/ when a new one is rendered
 MORE = 8                        # faces looked at per "Look for more"
 MAX_YAW, MAX_PITCH = 20, 20     # degrees; a pick must look about at the camera
 MIN_EYE_PX = 40                 # eye distance in the photo; smaller faces are too soft to use
@@ -271,9 +272,11 @@ def age_label(month, born):
 
 
 def _label(img, text):
-    H = img.shape[0]
+    """The age (or date) in the upper right, clear of a video player's controls along the bottom."""
+    W = img.shape[1]
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.6, 6)
     for color, thick in (((0, 0, 0), 6), ((255, 255, 255), 2)):
-        cv2.putText(img, text, (40, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.6, color, thick, cv2.LINE_AA)
+        cv2.putText(img, text, (W - tw - 40, 40 + th), cv2.FONT_HERSHEY_SIMPLEX, 1.6, color, thick, cv2.LINE_AA)
     return img
 
 
@@ -350,8 +353,34 @@ def render(specs, out_path, fps=30, hold=4, steps=16, log=print, workers=None):
         if subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listing,
                            '-c', 'copy', tmp_out]).returncode:
             raise RuntimeError("ffmpeg concat failed")
+        keep_version(Path(out_path))
         os.replace(tmp_out, out_path)
     log(f"  rendered in {time.time() - start:.0f}s")
+
+
+def keep_version(video, keep=KEEP_VERSIONS):
+    """Move the current video into versions/, named by when it was rendered, keeping the newest
+    `keep` there."""
+    if not video.exists():
+        return
+    vdir = video.parent / 'versions'
+    vdir.mkdir(exist_ok=True)
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(video.stat().st_mtime))
+    os.replace(video, vdir / f"{video.stem}-{stamp}.mp4")
+    for old in sorted(vdir.glob(f"{video.stem}-*.mp4"))[:-keep]:
+        old.unlink()
+
+
+def versions(video):
+    """[{'file', 'rendered'}] of the kept earlier videos, newest first."""
+    vdir = video.parent / 'versions'
+    out = []
+    for v in sorted(vdir.glob(f"{video.stem}-*.mp4"), reverse=True) if vdir.exists() else []:
+        m = re.search(r'-(\d{8})-(\d{6})\.mp4$', v.name)
+        if m:
+            d, t_ = m.groups()
+            out.append({'file': v.name, 'rendered': f"{d[:4]}-{d[4:6]}-{d[6:]} {t_[:2]}:{t_[2:4]}"})
+    return out
 
 
 def review_sheet(out_dir, person, months, picks):
@@ -521,7 +550,9 @@ def make_app(db_path, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH):
         v = d / f'{name}.mp4'
         born = json.loads((d / 'picks.json').read_text()).get('born')
         return {'person': person, 'born': born, 'months': months, 'job': jobs.get(name),
-                'video_mtime': int(v.stat().st_mtime) if v.exists() else None}
+                'video_mtime': int(v.stat().st_mtime) if v.exists() else None,
+                'video_rendered': time.strftime('%Y-%m-%d %H:%M', time.localtime(v.stat().st_mtime)) if v.exists() else None,
+                'versions': versions(v)}
 
     @app.post("/api/t/{name}/pick")
     def pick(name: str, body: PickIn):
@@ -643,6 +674,15 @@ def make_app(db_path, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH):
             return FileResponse(v, media_type='video/mp4', filename=f"{person} timelapse.mp4")
         return FileResponse(v, media_type='video/mp4')
 
+    @app.get("/version/{name}/{file}")
+    def old_video(name: str, file: str, download: bool = False):
+        d = folder(name)
+        if not re.fullmatch(rf'{re.escape(name)}-\d{{8}}-\d{{6}}\.mp4', file) or not (d / 'versions' / file).exists():
+            raise HTTPException(404)
+        person = json.loads((d / 'picks.json').read_text()).get('person') or name
+        kw = {'filename': f"{person} timelapse {file[len(name) + 1:-4]}.mp4"} if download else {}
+        return FileResponse(d / 'versions' / file, media_type='video/mp4', **kw)
+
     @app.get("/aligned/{name}/{face_id}.jpg")
     def aligned_thumb(name: str, face_id: int):
         t = folder(name) / 'thumbs' / f'{face_id}.jpg'
@@ -716,6 +756,7 @@ main { padding:0 16px 40px; display:grid; gap:12px; grid-template-columns:repeat
 <header><h1>Timelapse</h1><select id="who"></select>
   <label>Born <input id="born" type="month" title="Frames are labeled with the age at the time"></label>
   <button class="primary" id="rebuild">Rebuild video</button>
+  <select id="version" title="Earlier renders are kept to compare with"></select>
   <a id="download" class="button" hidden>Download video</a><span id="status"></span></header>
 <div id="top"><video id="video" controls loop muted playsinline></video>
   <div id="help">Each month shows the original photo chosen for it, and below it the faces that were
@@ -743,10 +784,10 @@ async function load(slug) {
   try { localStorage.setItem('timelapse', slug); } catch (e) {}
   data = await (await fetch(`api/t/${slug}`)).json();
   $('#born').value = data.born || '';
-  if (data.video_mtime) $('#video').src = `video/${slug}.mp4?v=${data.video_mtime}`;
-  else $('#video').removeAttribute('src');
-  $('#download').hidden = !data.video_mtime;
-  $('#download').href = `video/${slug}.mp4?download=1&v=${data.video_mtime}`;
+  const vs = data.video_mtime ? [{file: '', rendered: data.video_rendered}].concat(data.versions) : data.versions;
+  $('#version').innerHTML = vs.map((v, i) => `<option value="${esc(v.file)}">${i === 0 && !v.file ? 'Latest' : 'Earlier'} · ${esc(v.rendered)}</option>`).join('');
+  $('#version').hidden = vs.length < 2;
+  showVersion();
   showJob(data.job);
   const picked = data.months.filter(m => m.pick).length;
   $('#list').innerHTML = data.months.map(card).join('');
@@ -756,11 +797,11 @@ async function load(slug) {
 function card(m) {
   const pick = m.faces.find(f => f.id === m.pick);
   const when = pick && pick.taken ? pick.taken.slice(0, 10) : '';
-  const head = `<h3>${m.age ? esc(m.age) + ' <small>' + esc(m.month) + '</small>' : esc(m.month)} <small>${esc(when)}${pick ? ' · ' + esc(pick.file) : ''}${m.chosen_by === 'you' ? ' · your pick' : ''}</small></h3>
+  const head = `<h3>${esc(m.month)}${m.age ? ' (' + esc(m.age) + ')' : ''} <small>${esc(when)}${pick ? ' · ' + esc(pick.file) : ''}${m.chosen_by === 'you' ? ' · your pick' : ''}</small></h3>
     <div class="acts">${pick ? `<button onclick="notPerson('${m.month}', ${pick.id})">Not ${esc(data.person.split(' ')[0])}</button>` : ''}
       <button onclick="skipMonth('${m.month}', ${!m.skipped})">${m.skipped ? 'Use this month' : 'Remove this month'}</button>
       ${m.more && !m.skipped ? `<button onclick="lookMore(this, '${m.month}')">Look for more (${m.more} left)</button>` : ''}</div>`;
-  if (m.skipped) return `<div class="month skipped"><h3>${esc(m.month)} <small>removed: left out of the video</small></h3>
+  if (m.skipped) return `<div class="month skipped"><h3>${esc(m.month)}${m.age ? " (" + esc(m.age) + ")" : ""} <small>removed: left out of the video</small></h3>
     <div class="acts"><button onclick="skipMonth('${m.month}', false)">Use this month</button></div></div>`;
   const orig = pick ? `<img class="orig" loading="lazy" src="photo/${pick.id}.jpg" data-id="${pick.id}"
       data-cap="${esc(m.month)} · ${esc(pick.file)}" onclick="view(this)">` : '<div class="none">no usable photo</div>';
@@ -825,6 +866,15 @@ $('#rebuild').onclick = async () => {
   await fetch(`api/t/${current}/rebuild`, {method: 'POST'});
   showJob({state: 'running', log: []}); load(current);
 };
+function showVersion() {
+  const f = $('#version').value;
+  if (!data.video_mtime && !f) { $('#video').removeAttribute('src'); $('#download').hidden = true; return; }
+  const src = f ? `version/${current}/${f}` : `video/${current}.mp4?v=${data.video_mtime}`;
+  if ($('#video').getAttribute('src') !== src) $('#video').src = src;
+  $('#download').hidden = false;
+  $('#download').href = f ? `version/${current}/${f}?download=1` : `video/${current}.mp4?download=1&v=${data.video_mtime}`;
+}
+$('#version').onchange = showVersion;
 $('#born').onchange = () => act(`api/t/${current}/born`, {born: $('#born').value},
   'Birth month saved; Rebuild video to label the frames with ages');
 $('#who').onchange = () => { $('#status').textContent = ''; load($('#who').value); };

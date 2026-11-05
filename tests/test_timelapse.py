@@ -136,3 +136,24 @@ def test_render_joins_the_months_clips_into_one_video(tmp_path):
                              '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', str(out)],
                             capture_output=True, text=True).stdout.strip()
     assert int(frames) == 3 * 2 + 2 * 3, "each month held, then morphed into the next"
+
+
+def test_versions_keep_the_three_previous_videos(tmp_path):
+    import os
+    import time as _t
+    video = tmp_path / 'kid.mp4'
+    for i in range(5):
+        video.write_bytes(f'v{i}'.encode())
+        os.utime(video, (1_700_000_000 + i * 60,) * 2)
+        t.keep_version(video)
+        assert not video.exists()
+    kept = t.versions(video)
+    assert len(kept) == 3 and [ (tmp_path / 'versions' / v['file']).read_bytes() for v in kept] == [b'v4', b'v3', b'v2']
+    assert kept[0]['rendered'] == _t.strftime('%Y-%m-%d %H:%M', _t.localtime(1_700_000_000 + 4 * 60))
+
+
+def test_the_label_sits_in_the_upper_right():
+    img = np.zeros((1350, 1080, 3), np.uint8)
+    t._label(img, '1y 2m')
+    ys, xs = np.nonzero(img.max(axis=2))
+    assert xs.min() > 1080 / 2 and ys.max() < 1350 / 6
