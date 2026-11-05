@@ -36,7 +36,7 @@ from photo_organizer.db import DEFAULT_DB_PATH
 
 OUT_ROOT = '~/.photo-organizer/timelapse'
 PER_MONTH = 8                   # candidates tried per month at most
-HOLD, STEPS = 6, 24             # frames (at 30 fps) each month is held, then morphs into the next: 1 s a month
+HOLD, STEPS = 12, 48            # frames (at 30 fps) each month is held, then morphs into the next: 2 s a month
 KEEP_VERSIONS = 3               # earlier videos kept in versions/ when a new one is rendered
 MORE = 8                        # faces looked at per "Look for more"
 MAX_YAW, MAX_PITCH = 20, 20     # degrees; a pick must look about at the camera
