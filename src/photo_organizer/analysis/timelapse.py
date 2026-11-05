@@ -36,8 +36,10 @@ from photo_organizer.db import DEFAULT_DB_PATH
 
 OUT_ROOT = '~/.photo-organizer/timelapse'
 PER_MONTH = 8                   # candidates tried per month at most
+MORE = 8                        # faces looked at per "Look for more"
 MAX_YAW, MAX_PITCH = 20, 20     # degrees; a pick must look about at the camera
 MIN_EYE_PX = 40                 # eye distance in the photo; smaller faces are too soft to use
+MIN_EYES = 0.2                  # eye opening (height / width, from the landmarks); below: shut or squinting
 MIN_SHARP = 50                  # Laplacian variance of the aligned face that counts as in focus
 SIZE = (1080, 1350)             # output frame (4:5)
 EYE_Y, EYE_GAP = 0.42, 0.20     # eye line height and eye distance, as fractions of the frame
@@ -56,7 +58,8 @@ def _month(path, taken):
 
 
 def candidates(conn, person, catalog_path=DEFAULT_DB_PATH, per_month=PER_MONTH):
-    """{month 'YYYY-MM': [face rows]}: the person's hand-named faces, best detections first."""
+    """{month 'YYYY-MM': [face rows]}: the person's hand-named faces, best detections first
+    (the first per_month of them; per_month None for all)."""
     rows = conn.execute(
         "SELECT f.id, f.sha256, f.x1, f.y1, f.x2, f.y2, f.det_score, i.path FROM faces f "
         "JOIN images i ON i.sha256 = f.sha256 JOIN persons p ON p.id = f.person_id "
@@ -141,9 +144,24 @@ def measure(model, r):
             'sharp': sharpness(bgr, left, right), 'size': [bgr.shape[1], bgr.shape[0]]}
 
 
+def eye_opening(lm):
+    """Mean eye aspect ratio over both eyes (68-point landmarks): about 0.3 open, under 0.15 shut."""
+    P = np.asarray(lm)
+
+    def ear(e):
+        return (np.linalg.norm(e[1] - e[5]) + np.linalg.norm(e[2] - e[4])) / (2 * np.linalg.norm(e[0] - e[3]) + 1e-6)
+    return float((ear(P[36:42]) + ear(P[42:48])) / 2)
+
+
+def eyes(m):
+    """The face's eye opening, or None when it was measured before landmarks were kept."""
+    return eye_opening(m['lm']) if m and m.get('lm') else None
+
+
 def decent(m):
+    e = eyes(m)
     return bool(m) and abs(m['yaw']) <= MAX_YAW and abs(m['pitch']) <= MAX_PITCH \
-        and m['eye_px'] >= MIN_EYE_PX and m['sharp'] >= MIN_SHARP
+        and m['eye_px'] >= MIN_EYE_PX and m['sharp'] >= MIN_SHARP and (e is None or e >= MIN_EYES)
 
 
 def choose(cands):
@@ -151,17 +169,33 @@ def choose(cands):
     ok = [c for c in cands if c.get('m')]
     if not ok:
         return None
-    frontal = lambda c: abs(c['m']['yaw']) <= MAX_YAW and abs(c['m']['pitch']) <= MAX_PITCH
+    frontal = lambda c: abs(c['m']['yaw']) <= MAX_YAW and abs(c['m']['pitch']) <= MAX_PITCH \
+        and (eyes(c['m']) or 1) >= MIN_EYES
     big = lambda c: c['m']['eye_px'] >= MIN_EYE_PX
     return max(ok, key=lambda c: (frontal(c) and big(c), big(c),
                                   c['m']['sharp'] - 3 * abs(c['m']['yaw']) - 2 * abs(c['m']['pitch'])))
+
+
+def _backdrop(bgr, A, size):
+    """The aligned photo mirrored past its edges, heavily blurred and a bit darker: fills what the
+    photo doesn't reach (a close-up's edges) with its own colors instead of black."""
+    W, H = size
+    small = cv2.warpAffine(bgr, A / [[8], [8]], (W // 8, H // 8), flags=cv2.INTER_AREA,
+                           borderMode=cv2.BORDER_REFLECT_101)
+    small = cv2.GaussianBlur(small, (0, 0), 9)
+    return (cv2.resize(small, size, interpolation=cv2.INTER_LINEAR) * 0.75).astype(np.uint8)
 
 
 def aligned(c, size=SIZE):
     rgb, _ = load_image(c['path'])
     bgr = np.ascontiguousarray(np.asarray(rgb.convert('RGB'))[:, :, ::-1])
     A = eye_transform(c['m']['left'], c['m']['right'], size)
-    return cv2.warpAffine(bgr, A, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    img = cv2.warpAffine(bgr, A, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    inside = cv2.warpAffine(np.ones(bgr.shape[:2], np.float32), A, size, flags=cv2.INTER_LINEAR)
+    if inside.min() >= 0.999:
+        return img
+    inside = cv2.GaussianBlur(inside, (0, 0), 6)[:, :, None]       # a soft seam, not a hard edge
+    return (img * inside + _backdrop(bgr, A, size) * (1 - inside)).astype(np.uint8)
 
 
 def morph_points(c, size=SIZE):
@@ -288,12 +322,12 @@ def build(db_path, person, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH, per_
     cache_path = out_dir / 'candidates.json'
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     with closing(ark_faces.connect(db_path)) as conn:
-        months = candidates(conn, person, catalog_path, per_month)
+        months = candidates(conn, person, catalog_path, None)
     log(f"{person}: {len(months)} months; trying up to {per_month} faces a month until one is decent")
     model = None
     start, n = time.time(), 0
     for month, cands in months.items():
-        for c in cands:                     # in pre-rank order, stopping at the first decent one
+        for c in cands[:per_month]:         # in pre-rank order, stopping at the first decent one
             key = str(c['id'])
             if key not in cache:
                 model = model or PoseModel()
@@ -318,6 +352,7 @@ def build(db_path, person, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH, per_
     for month, cands in months.items():
         if month in skip:
             continue
+        cands = [dict(x, m=cache[str(x['id'])]) for x in cands if str(x['id']) in cache]  # incl. Look for more
         c = (next((x for x in cands if str(x['id']) == str(overrides.get(month)) and x.get('m')), None)
              or next((x for x in cands if decent(x.get('m'))), None) or choose(cands))
         for x in cands:                                   # review thumbnails, eye-aligned
@@ -350,7 +385,7 @@ def months_summary(db_path, out_dir, catalog_path=DEFAULT_DB_PATH):
     with closing(ark_faces.connect(db_path)) as conn:
         if not person:                                  # picks.json from before 'person' was kept
             person = next((n for n in ark_faces.persons(conn) if slug(n) == out_dir.name), out_dir.name)
-        months = candidates(conn, person, catalog_path)
+        months = candidates(conn, person, catalog_path, None)
     out = []
     for month, cands in months.items():
         faces = []
@@ -360,8 +395,10 @@ def months_summary(db_path, out_dir, catalog_path=DEFAULT_DB_PATH):
                 continue                                # never looked at: the month stopped earlier
             faces.append({'id': c['id'], 'file': os.path.basename(c['path']), 'taken': c['taken'],
                           'measured': bool(m), 'decent': decent(m),
-                          **({k: round(m[k]) for k in ('yaw', 'pitch', 'sharp', 'eye_px')} if m else {})})
-        out.append({'month': month, 'pick': None if month in skip else picks.get(month), 'faces': faces,
+                          **({k: round(m[k]) for k in ('yaw', 'pitch', 'sharp', 'eye_px')} if m else {}),
+                          'eyes': round(eyes(m), 2) if eyes(m) is not None else None})
+        left = sum(1 for c in cands if str(c['id']) not in cache)
+        out.append({'month': month, 'more': left, 'pick': None if month in skip else picks.get(month), 'faces': faces,
                     'chosen_by': 'you' if month in overrides else 'auto', 'skipped': month in skip})
     return person, out
 
@@ -468,6 +505,38 @@ def make_app(db_path, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH):
                 data['overrides'].pop(body.month)
         edit(d, fn)
         return {'ok': True}
+
+    model_lock = threading.Lock()
+    model_box = {}
+
+    @app.post("/api/t/{name}/more")
+    def more(name: str, body: SkipIn):
+        """Look at the month's next few named faces (best detections first); returns how many of
+        them are decent. The month's pick stays until you click one, or Rebuild re-picks."""
+        d = folder(name)
+        person, _ = months_summary(db_path, d, catalog_path)
+        with closing(ark_faces.connect(db_path)) as conn:
+            cands = candidates(conn, person, catalog_path, None).get(body.month, [])
+        cache_path = d / 'candidates.json'
+        with model_lock:
+            cache = json.loads(cache_path.read_text())
+            todo = [c for c in cands if str(c['id']) not in cache][:MORE]
+            if todo and 'm' not in model_box:
+                model_box['m'] = PoseModel()
+            found = 0
+            for c in todo:
+                try:
+                    m = measure(model_box['m'], c)
+                except Exception:
+                    m = None
+                cache[str(c['id'])] = m
+                found += decent(m)
+                if m:
+                    t = d / 'thumbs' / f"{c['id']}.jpg"
+                    cv2.imwrite(str(t), cv2.resize(aligned(dict(c, m=m), (432, 540)), (150, 188))[19:169],
+                                [cv2.IMWRITE_JPEG_QUALITY, 85])
+            cache_path.write_text(json.dumps(cache))
+        return {'ok': True, 'looked': len(todo), 'decent': found}
 
     @app.post("/api/t/{name}/rebuild")
     def rebuild(name: str):
@@ -600,14 +669,32 @@ function card(m) {
   const when = pick && pick.taken ? pick.taken.slice(0, 10) : '';
   const head = `<h3>${esc(m.month)} <small>${esc(when)}${pick ? ' · ' + esc(pick.file) : ''}${m.chosen_by === 'you' ? ' · your pick' : ''}</small></h3>
     <div class="acts">${pick ? `<button onclick="notPerson('${m.month}', ${pick.id})">Not ${esc(data.person.split(' ')[0])}</button>` : ''}
-      <button onclick="skipMonth('${m.month}', ${!m.skipped})">${m.skipped ? 'Use this month' : 'Skip month'}</button></div>`;
+      <button onclick="skipMonth('${m.month}', ${!m.skipped})">${m.skipped ? 'Use this month' : 'Skip month'}</button>
+      ${m.more && !m.skipped ? `<button onclick="lookMore(this, '${m.month}')">Look for more (${m.more} left)</button>` : ''}</div>`;
   if (m.skipped) return `<div class="month skipped">${head}<div class="none">left out of the video</div></div>`;
   const orig = pick ? `<img class="orig" loading="lazy" src="photo/${pick.id}.jpg" data-id="${pick.id}"
       data-cap="${esc(m.month)} · ${esc(pick.file)}" onclick="view(this)">` : '<div class="none">no usable photo</div>';
   const alts = m.faces.filter(f => f.measured).map(f => `<figure><img loading="lazy" src="aligned/${current}/${f.id}.jpg"
-      class="${f.id === m.pick ? 'on' : ''} ${f.decent ? '' : 'bad'}" title="${esc(f.file)} · yaw ${f.yaw}° pitch ${f.pitch}° · sharp ${f.sharp} · eyes ${f.eye_px}px"
-      onclick="choose('${m.month}', ${f.id})"><br>${f.decent ? 'ok' : (Math.abs(f.yaw) > 20 || Math.abs(f.pitch) > 20 ? 'turned' : f.eye_px < 40 ? 'small' : 'soft')}</figure>`).join('');
+      class="${f.id === m.pick ? 'on' : ''} ${f.decent ? '' : 'bad'}" title="${esc(f.file)} · yaw ${f.yaw}° pitch ${f.pitch}° · sharp ${f.sharp} · eyes ${f.eye_px}px${f.eyes != null ? ' · eye opening ' + f.eyes : ''}"
+      onclick="choose('${m.month}', ${f.id})"><br>${why(f)}</figure>`).join('');
   return `<div class="month">${head}${orig}<div class="alts">${alts}</div></div>`;
+}
+
+function why(f) {
+  if (f.decent) return 'ok';
+  if (Math.abs(f.yaw) > 20 || Math.abs(f.pitch) > 20) return 'turned';
+  if (f.eye_px < 40) return 'small';
+  if (f.eyes != null && f.eyes < 0.2) return 'eyes shut';
+  return 'soft';
+}
+
+async function lookMore(btn, month) {
+  btn.disabled = true; btn.textContent = 'Looking…';
+  const r = await fetch(`api/t/${current}/more`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                  body: JSON.stringify({month})});
+  const d = r.ok ? await r.json() : null;
+  $('#status').textContent = d ? `${month}: looked at ${d.looked} more, ${d.decent} decent; click one to use it` : 'Look for more failed';
+  const y = window.scrollY; await load(current); window.scrollTo(0, y);
 }
 
 async function act(url, body, msg) {

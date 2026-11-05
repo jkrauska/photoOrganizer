@@ -84,3 +84,17 @@ def test_timelapse_page_lists_months_and_saves_a_pick(tmp_path):
     assert client.post('/api/t/kid/not_person', json={'month': '2019-01', 'face_id': 2}).status_code == 404
     assert client.get('/api/t/nobody').status_code == 404
     assert client.get('/api/t/..%2Fx').status_code == 404
+
+
+def test_eye_opening_tells_open_eyes_from_shut_ones():
+    def face(open_):
+        P = np.zeros((68, 2))
+        for start, x0 in ((36, 30), (42, 70)):              # each eye: corners 20 px apart
+            P[start:start + 6] = [[x0, 50], [x0 + 6, 50 - open_], [x0 + 14, 50 - open_],
+                                  [x0 + 20, 50], [x0 + 14, 50 + open_], [x0 + 6, 50 + open_]]
+        return P.tolist()
+    assert t.eye_opening(face(3)) == pytest.approx(0.3)
+    assert t.eye_opening(face(1)) < t.MIN_EYES
+    m = {'yaw': 0, 'pitch': 0, 'eye_px': 90, 'sharp': 200}
+    assert t.decent(dict(m, lm=face(3))) and not t.decent(dict(m, lm=face(1)))
+    assert t.decent(m), "measured before landmarks were kept: not held against it"
