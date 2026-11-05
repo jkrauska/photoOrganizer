@@ -152,8 +152,10 @@ def test_versions_keep_the_three_previous_videos(tmp_path):
     assert kept[0]['rendered'] == _t.strftime('%Y-%m-%d %H:%M', _t.localtime(1_700_000_000 + 4 * 60))
 
 
-def test_the_label_sits_in_the_upper_right():
-    img = np.zeros((1350, 1080, 3), np.uint8)
-    t._label(img, '1y 2m')
-    ys, xs = np.nonzero(img.max(axis=2))
+def test_the_label_sits_in_the_upper_right_date_over_age():
+    one, two = np.zeros((1350, 1080, 3), np.uint8), np.zeros((1350, 1080, 3), np.uint8)
+    t._label(one, '2013-03')
+    t._label(two, '2013-03\n1y 2m')
+    ys, xs = np.nonzero(two.max(axis=2))
     assert xs.min() > 1080 / 2 and ys.max() < 1350 / 6
+    assert np.nonzero(one.max(axis=2))[0].max() < ys.max(), "the age is on a second line below"

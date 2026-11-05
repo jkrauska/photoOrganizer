@@ -273,11 +273,16 @@ def age_label(month, born):
 
 
 def _label(img, text):
-    """The age (or date) in the upper right, clear of a video player's controls along the bottom."""
+    """The label's lines (the date, then the age) right-aligned in the upper right, clear of a
+    video player's controls along the bottom."""
     W = img.shape[1]
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.6, 6)
-    for color, thick in (((0, 0, 0), 6), ((255, 255, 255), 2)):
-        cv2.putText(img, text, (W - tw - 40, 40 + th), cv2.FONT_HERSHEY_SIMPLEX, 1.6, color, thick, cv2.LINE_AA)
+    y = 40
+    for line in text.split('\n'):
+        (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 1.6, 6)
+        y += th
+        for color, thick in (((0, 0, 0), 6), ((255, 255, 255), 2)):
+            cv2.putText(img, line, (W - tw - 40, y), cv2.FONT_HERSHEY_SIMPLEX, 1.6, color, thick, cv2.LINE_AA)
+        y += 22
     return img
 
 
@@ -457,7 +462,8 @@ def build(db_path, person, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH, per_
             model = model or PoseModel()
             c['m'] = cache[str(c['id'])] = measure(model, c) or c['m']
         picks[month] = c['id']
-        frames.append({'label': age_label(month, born), 'path': c['path'], 'm': c['m']})
+        age = age_label(month, born)
+        frames.append({'label': month + (f"\n{age}" if age != month else ''), 'path': c['path'], 'm': c['m']})
     cache_path.write_text(json.dumps(cache))
     picks_path.write_text(json.dumps({'person': person, 'born': born, 'picks': picks, 'overrides': overrides,
                                       'skip': skip}, indent=1))
