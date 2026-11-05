@@ -86,6 +86,10 @@ def test_timelapse_page_lists_months_and_saves_a_pick(tmp_path):
     got = client.get('/api/t/kid').json()
     assert got['born'] == '2018-07' and got['months'][0]['age'] == '6m'
     assert client.post('/api/t/kid/born', json={'born': 'July'}).status_code == 400
+    (out / 'kid.mp4').write_bytes(b'mp4')
+    r = client.get('/video/kid.mp4', params={'download': 1})
+    assert r.content == b'mp4' and 'Kid%20timelapse.mp4' in r.headers['content-disposition']
+    assert 'content-disposition' not in client.get('/video/kid.mp4').headers
     assert client.get('/api/t/nobody').status_code == 404
     assert client.get('/api/t/..%2Fx').status_code == 404
 

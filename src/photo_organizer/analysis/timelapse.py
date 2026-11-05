@@ -585,10 +585,14 @@ def make_app(db_path, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH):
         return {'ok': True}
 
     @app.get("/video/{name}.mp4")
-    def video(name: str):
-        v = folder(name) / f'{name}.mp4'
+    def video(name: str, download: bool = False):
+        d = folder(name)
+        v = d / f'{name}.mp4'
         if not v.exists():
             raise HTTPException(404)
+        if download:                                    # saved as "<Person> timelapse.mp4"
+            person = json.loads((d / 'picks.json').read_text()).get('person') or name
+            return FileResponse(v, media_type='video/mp4', filename=f"{person} timelapse.mp4")
         return FileResponse(v, media_type='video/mp4')
 
     @app.get("/aligned/{name}/{face_id}.jpg")
@@ -633,6 +637,8 @@ body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 -apple-sy
 header { position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line);
   padding:10px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
 header h1 { font-size:17px; margin:0; }
+a.button { text-decoration:none; border:1px solid var(--line); border-radius:8px; padding:5px 10px; color:var(--ink);
+  background:var(--card); }
 select, button, input { font:inherit; padding:5px 10px; border-radius:8px; border:1px solid var(--line);
   background:var(--card); color:var(--ink); cursor:pointer; }
 button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -661,7 +667,8 @@ main { padding:0 16px 40px; display:grid; gap:12px; grid-template-columns:repeat
 </style></head><body>
 <header><h1>Timelapse</h1><select id="who"></select>
   <label>Born <input id="born" type="month" title="Frames are labeled with the age at the time"></label>
-  <button class="primary" id="rebuild">Rebuild video</button><span id="status"></span></header>
+  <button class="primary" id="rebuild">Rebuild video</button>
+  <a id="download" class="button" hidden>Download video</a><span id="status"></span></header>
 <div id="top"><video id="video" controls loop muted playsinline></video>
   <div id="help">Each month shows the original photo chosen for it, and below it the faces that were
   looked at (green outline: the pick; faded: turned, too small, eyes shut or soft). Click one to
@@ -690,6 +697,8 @@ async function load(slug) {
   $('#born').value = data.born || '';
   if (data.video_mtime) $('#video').src = `video/${slug}.mp4?v=${data.video_mtime}`;
   else $('#video').removeAttribute('src');
+  $('#download').hidden = !data.video_mtime;
+  $('#download').href = `video/${slug}.mp4?download=1&v=${data.video_mtime}`;
   showJob(data.job);
   const picked = data.months.filter(m => m.pick).length;
   $('#list').innerHTML = data.months.map(card).join('');
