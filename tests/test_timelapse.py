@@ -116,3 +116,23 @@ def test_age_label_counts_months_from_the_birth_month():
     assert t.age_label('2026-11', '2012-01') == '14y 10m'
     assert t.age_label('2011-12', '2012-01') == '2011-12', "before the birth month: the date"
     assert t.age_label('2013-03', None) == '2013-03'
+
+
+def test_render_joins_the_months_clips_into_one_video(tmp_path):
+    import shutil
+    import subprocess
+    from PIL import Image
+    if not shutil.which('ffmpeg'):
+        pytest.skip('no ffmpeg')
+    specs = []
+    for i in range(3):
+        p = tmp_path / f'{i}.jpg'
+        Image.new('RGB', (400, 300), (60 * i, 90, 120)).save(p)
+        specs.append({'label': f'{i}m', 'path': str(p),
+                      'm': {'left': [170, 140], 'right': [230, 140], 'lm': None}})
+    out = tmp_path / 'out.mp4'
+    t.render(specs, out, hold=2, steps=3, log=lambda s: None, workers=2)
+    frames = subprocess.run(['ffprobe', '-v', 'error', '-count_frames', '-select_streams', 'v:0',
+                             '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', str(out)],
+                            capture_output=True, text=True).stdout.strip()
+    assert int(frames) == 3 * 2 + 2 * 3, "each month held, then morphed into the next"

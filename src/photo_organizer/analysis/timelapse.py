@@ -281,29 +281,77 @@ def _ease(t):
     return t * t * (3 - 2 * t)                      # smoothstep: eases into and out of each morph
 
 
-def render(frames, out_path, fps=30, hold=4, steps=16, log=print):
-    """MP4 of the frames [(label, image, morph points or None)]: each held `hold` frames, then
-    morphed into the next over `steps` frames (a plain crossfade when either has no landmarks)."""
-    W, H = frames[0][1].shape[1], frames[0][1].shape[0]
-    ff = subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'bgr24',
-                           '-s', f'{W}x{H}', '-r', str(fps), '-i', '-', '-c:v', 'libx264',
-                           '-pix_fmt', 'yuv420p', '-crf', '20', str(out_path)], stdin=subprocess.PIPE)
-    start = time.time()
-    for i, (label, img, pts) in enumerate(frames):
-        for _ in range(hold):
-            ff.stdin.write(_label(img.copy(), label).tobytes())
-        if i + 1 < len(frames):
-            nlabel, nxt, npts = frames[i + 1]
-            tris = _triangles((pts + npts) / 2, (W, H)) if pts is not None and npts is not None else None
-            for k in range(1, steps + 1):
-                t = _ease(k / (steps + 1))
-                f = morph(img, nxt, pts, npts, tris, t) if tris else cv2.addWeighted(img, 1 - t, nxt, t, 0)
-                ff.stdin.write(_label(f, label if t < 0.5 else nlabel).tobytes())
-        if (i + 1) % 20 == 0:
-            log(f"  rendered {i + 1}/{len(frames)} months  ({(time.time() - start) / (i + 1):.1f}s each)")
+def _workers():
+    return max(2, min(6, (os.cpu_count() or 4) - 4))     # leave room for the face and days jobs
+
+
+def _ffmpeg(out_path, size, fps, threads=2):
+    W, H = size
+    return subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'bgr24',
+                             '-s', f'{W}x{H}', '-r', str(fps), '-i', '-', '-c:v', 'libx264', '-threads',
+                             str(threads), '-pix_fmt', 'yuv420p', '-crf', '20', str(out_path)],
+                            stdin=subprocess.PIPE)
+
+
+def _align_one(job):
+    """Worker: the eye-aligned frame of one pick, saved for the segment workers."""
+    cv2.setNumThreads(1)
+    spec, path = job
+    np.save(path, aligned(spec))
+    return path
+
+
+def _segment(job):
+    """Worker: one month's clip: its frame held, then morphed into the next month's."""
+    cv2.setNumThreads(1)
+    a, b, fa, fb, out, fps, hold, steps = job
+    img = np.load(fa)
+    ff = _ffmpeg(out, (img.shape[1], img.shape[0]), fps)
+    for _ in range(hold):
+        ff.stdin.write(_label(img.copy(), a['label']).tobytes())
+    if b is not None:
+        nxt = np.load(fb)
+        pts, npts = morph_points(a), morph_points(b)
+        tris = _triangles((pts + npts) / 2, (img.shape[1], img.shape[0])) if pts is not None and npts is not None else None
+        for k in range(1, steps + 1):
+            t = _ease(k / (steps + 1))
+            f = morph(img, nxt, pts, npts, tris, t) if tris else cv2.addWeighted(img, 1 - t, nxt, t, 0)
+            ff.stdin.write(_label(f, a['label'] if t < 0.5 else b['label']).tobytes())
     ff.stdin.close()
     if ff.wait():
-        raise RuntimeError("ffmpeg failed")
+        raise RuntimeError(f"ffmpeg failed on {out}")
+    return out
+
+
+def render(specs, out_path, fps=30, hold=4, steps=16, log=print, workers=None):
+    """MP4 of the picks [{'label', 'path', 'm'}]: each held `hold` frames, then morphed into the
+    next over `steps` frames (a crossfade when either has no landmarks). The frames are aligned
+    and the months' clips rendered by a pool of processes; ffmpeg then joins the clips as they are."""
+    import multiprocessing as mp
+    import tempfile
+    workers = workers or _workers()
+    start = time.time()
+    with tempfile.TemporaryDirectory(prefix='timelapse-') as tmp, \
+            mp.get_context('spawn').Pool(workers) as pool:
+        frames = [os.path.join(tmp, f'{i:04d}.npy') for i in range(len(specs))]
+        pool.map(_align_one, list(zip(specs, frames)))
+        log(f"  aligned {len(specs)} photos in {time.time() - start:.0f}s ({workers} workers)")
+        clips = [os.path.join(tmp, f'{i:04d}.mp4') for i in range(len(specs))]
+        jobs = [(specs[i], specs[i + 1] if i + 1 < len(specs) else None, frames[i],
+                 frames[i + 1] if i + 1 < len(specs) else None, clips[i], fps, hold, steps)
+                for i in range(len(specs))]
+        for n, _ in enumerate(pool.imap_unordered(_segment, jobs), 1):
+            if n % 20 == 0:
+                log(f"  rendered {n}/{len(specs)} months  ({time.time() - start:.0f}s so far)")
+        listing = os.path.join(tmp, 'clips.txt')
+        with open(listing, 'w') as f:
+            f.writelines(f"file '{c}'\n" for c in clips)
+        tmp_out = str(out_path) + '.part.mp4'
+        if subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listing,
+                           '-c', 'copy', tmp_out]).returncode:
+            raise RuntimeError("ffmpeg concat failed")
+        os.replace(tmp_out, out_path)
+    log(f"  rendered in {time.time() - start:.0f}s")
 
 
 def review_sheet(out_dir, person, months, picks):
@@ -379,7 +427,7 @@ def build(db_path, person, out_root=OUT_ROOT, catalog_path=DEFAULT_DB_PATH, per_
             model = model or PoseModel()
             c['m'] = cache[str(c['id'])] = measure(model, c) or c['m']
         picks[month] = c['id']
-        frames.append((age_label(month, born), aligned(c), morph_points(c)))
+        frames.append({'label': age_label(month, born), 'path': c['path'], 'm': c['m']})
     cache_path.write_text(json.dumps(cache))
     picks_path.write_text(json.dumps({'person': person, 'born': born, 'picks': picks, 'overrides': overrides,
                                       'skip': skip}, indent=1))
