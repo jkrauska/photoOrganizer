@@ -15,6 +15,7 @@ backfill_hashes reads it (worker idle time), and a same-size arrival hashes it f
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
@@ -53,16 +54,22 @@ def _has_time_machine_deny_acl(path):
 
 
 def remove_source(path):
-    """Delete a source whose bytes are verified in the store. Only the Time Machine deny ACL is
-    stripped to allow this; any other permission problem is raised and the source stays."""
+    """Delete a source whose bytes are verified in the store. Only Finder's Locked flag (uchg) and
+    the Time Machine deny ACL are cleared to allow this; any other permission problem is raised
+    and the source stays."""
     if is_time_machine_path(path):
         raise PermissionError(f"refusing to delete inside a Time Machine backup: {path}")
     try:
         os.unlink(path)
     except PermissionError:
-        if not _has_time_machine_deny_acl(path):
+        flags = getattr(os.lstat(path), 'st_flags', 0)
+        locked = bool(flags & stat.UF_IMMUTABLE)
+        if not locked and not _has_time_machine_deny_acl(path):
             raise
-        subprocess.run(['chmod', '-N', path], check=True, capture_output=True)
+        if locked:
+            os.chflags(path, flags & ~stat.UF_IMMUTABLE, follow_symlinks=False)
+        if _has_time_machine_deny_acl(path):
+            subprocess.run(['chmod', '-N', path], check=True, capture_output=True)
         os.unlink(path)
 
 

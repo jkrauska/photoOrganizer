@@ -437,6 +437,18 @@ def test_time_machine_paths_are_always_copy_only(env, tmp_path):
         remove_source(photo)
 
 
+@pytest.mark.skipif(not hasattr(os, 'chflags'), reason='BSD file flags')
+def test_finder_locked_source_is_unlocked_and_deleted_after_verified_copy(env):
+    import stat
+    src, dest, go, rows = env
+    photo = make_jpeg(f"{src}/IMG_5.jpg", "2019:05:05 12:00:00", (5, 5, 5))
+    os.chflags(photo, stat.UF_IMMUTABLE)      # Finder > Get Info > Locked
+    go()
+    assert files_under(dest) == ['2019/05/2019-05-05/IMG_5.jpg']
+    assert not os.path.exists(photo)
+    assert [r['error_message'] for r in rows().values()] == [None]
+
+
 def test_queue_marks_time_machine_folders_copy_only(tmp_path):
     from photo_organizer.db import init_db
     from photo_organizer.work_queue import enqueue
