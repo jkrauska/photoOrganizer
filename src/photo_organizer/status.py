@@ -236,7 +236,7 @@ svg { width:100%; height:90px; display:block; }
 <div class="card" id="largecard" style="margin-bottom:12px;display:none"><h2>Large files in flight</h2><div id="large"></div></div>
 <div class="card" style="margin-bottom:12px"><h2>Queue <span id="worker" class="s" style="text-transform:none;letter-spacing:0"></span></h2>
   <form id="qform" class="qform" autocomplete="off">
-    <input id="qpath" list="qdirs" placeholder="/Volumes/Photowork/Masters — type a path (or photos:2016); subfolders are suggested" spellcheck="false">
+    <input id="qpath" list="qdirs" placeholder="/Volumes/Backup/Pictures — type a path (or photos:2016); subfolders are suggested" spellcheck="false">
     <datalist id="qdirs"></datalist>
     <label class="s" title="Verify copies into the store but never delete the originals (always on for Time Machine backups)"><input type="checkbox" id="qkeep"> copy only (keep originals)</label>
     <label class="s" title="Queue each subfolder as its own item, then the folder itself: for large folders"><input type="checkbox" id="qsplit"> split into subfolders</label>

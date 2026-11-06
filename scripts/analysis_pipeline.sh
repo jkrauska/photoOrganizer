@@ -6,12 +6,14 @@
 #   scripts/analysis_pipeline.sh -n 50                 # limit analyze + enrich to 50 photos
 #   scripts/analysis_pipeline.sh -n 5 --no-geocode     # quick test, skip Nominatim
 #   scripts/analysis_pipeline.sh --skip-analyze        # cluster + enrich only (reuse existing JSONL)
-#   scripts/analysis_pipeline.sh --data-dir DIR        # sidecar location (default: $PHOTO_ANALYSIS_DIR or ~/gemma)
+#   scripts/analysis_pipeline.sh --data-dir DIR        # sidecars (default: $PHOTO_ANALYSIS_DIR or ~/.photo-organizer/analysis)
+#   scripts/analysis_pipeline.sh --contact me@real.tld # Nominatim User-Agent (or $PHOTO_ORGANIZER_CONTACT)
 
 set -eo pipefail
 
 LIMIT_ARGS=()
 GEOCODE_ARGS=()
+CONTACT_ARGS=()
 DATA_ARGS=()
 SKIP_ANALYZE=0
 SKIP_CLUSTER=0
@@ -22,12 +24,13 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--limit)       LIMIT_ARGS=(-n "$2"); shift 2 ;;
     --no-geocode)     GEOCODE_ARGS=(--no-geocode); shift ;;
+    --contact)        CONTACT_ARGS=(--contact "$2"); shift 2 ;;
     --data-dir)       DATA_ARGS=(--data-dir "$2"); shift 2 ;;
     --skip-analyze)   SKIP_ANALYZE=1; shift ;;
     --skip-cluster)   SKIP_CLUSTER=1; shift ;;
     --skip-enrich)    SKIP_ENRICH=1; shift ;;
     --skip-index)     SKIP_INDEX=1; shift ;;
-    -h|--help)        sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help)        sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -49,7 +52,7 @@ fi
 
 if [[ $SKIP_ENRICH -eq 0 ]]; then
   echo "==> Step 3/4: photo-enrich (exiftool + ffprobe + Nominatim)"
-  uv run photo-enrich "${LIMIT_ARGS[@]}" "${GEOCODE_ARGS[@]}" "${DATA_ARGS[@]}"
+  uv run photo-enrich "${LIMIT_ARGS[@]}" "${GEOCODE_ARGS[@]}" "${CONTACT_ARGS[@]}" "${DATA_ARGS[@]}"
 fi
 
 if [[ $SKIP_INDEX -eq 0 ]]; then

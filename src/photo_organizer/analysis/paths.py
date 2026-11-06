@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_DATA_DIR = Path(os.environ.get("PHOTO_ANALYSIS_DIR", "~/gemma")).expanduser()
+DEFAULT_DATA_DIR = Path(os.environ.get("PHOTO_ANALYSIS_DIR", "~/.photo-organizer/analysis")).expanduser()
 
 
 @dataclass(frozen=True)

@@ -1,13 +1,16 @@
 # Photo cleanup into the canonical store. Override any variable on the command line, e.g.
 #   make run LIMIT=200
 #   make run YES=1                      # no per-batch prompts (long unattended runs)
-#   make run SOURCES="/Volumes/Photowork/Image Archive"
+#   make run SOURCES="/Volumes/Backup/Image Archive"
 #   make queue SRC="/some/backup" KEEP=1   # copy-only: never delete originals (automatic for Time Machine)
 #   make queue SRC="/big/folder" SPLIT=1  # one queue item per subfolder, then the folder itself
 #   make queue-photos YEARS="2010 2011"    # Apple Photos library years, copy-only (default: all, oldest first)
 # SOURCES is comma-separated so paths may contain spaces.
+#
+# Your own paths belong in config.mk (gitignored); copy config.mk.example to start.
+-include config.mk
 
-SOURCES ?= /Volumes/fileshares/photos,/Volumes/fileshares/photosCleanup2026,/Volumes/Photowork
+SOURCES ?=
 DEST    ?= /Volumes/photoArk
 CATALOG ?= $(HOME)/.photo-organizer/catalog.db
 LOGDIR  ?= $(HOME)/.photo-organizer/logs
@@ -38,7 +41,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
-.PHONY: help sync inventory run queue queue-photos set-date queue-list cameras cameras-stats worker worker-bg stop verify status enrich faces browse test \
+.PHONY: help sync require-sources inventory run queue queue-photos set-date queue-list cameras cameras-stats worker worker-bg stop verify status enrich faces browse test \
 	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui ui
 
 help:
@@ -67,6 +70,7 @@ help:
 	@echo "make ark-shuffle-ui  random walk through the store, score photos 1-5 (http://$(shell hostname):$(SHUFFLE_PORT))"
 	@echo "make test       run the test suite"
 	@echo
+	@echo "Paths come from config.mk (gitignored; copy config.mk.example) or the command line."
 	@echo "SOURCES=$(SOURCES)"
 	@echo "DEST=$(DEST)  CATALOG=$(CATALOG)  LIMIT=$(LIMIT)"
 
@@ -76,10 +80,14 @@ sync:
 $(LOGDIR):
 	@mkdir -p "$(LOGDIR)"
 
-inventory: sync | $(LOGDIR)
+require-sources:
+	@test -n "$(SOURCES)" || { echo 'SOURCES is empty: set it in config.mk (see config.mk.example)'; \
+		echo 'or pass it in, e.g. make $(MAKECMDGOALS) SOURCES="/Volumes/Backup/Pictures"'; exit 2; }
+
+inventory: require-sources sync | $(LOGDIR)
 	$(ORGANIZE) 2>&1 | tee "$(LOGDIR)/inventory-$(STAMP).log"
 
-run: sync | $(LOGDIR)
+run: require-sources sync | $(LOGDIR)
 	$(ORGANIZE) --execute 2>&1 | tee "$(LOGDIR)/run-$(STAMP).log"
 
 queue: sync
@@ -129,7 +137,7 @@ faces:
 
 browse:
 	uv sync --quiet --extra analysis
-	uv run datasette "$${PHOTO_ANALYSIS_DIR:-$(HOME)/gemma}/photos.db" -o
+	uv run datasette "$${PHOTO_ANALYSIS_DIR:-$(HOME)/.photo-organizer/analysis}/photos.db" -o
 
 ark-faces: | $(LOGDIR)
 	uv sync --quiet --extra analysis

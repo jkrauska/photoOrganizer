@@ -10,7 +10,7 @@ landmarks, a few forehead points and the frame edges are triangulated, and each 
 warped toward the in-between shape while the colors blend, so the face grows rather than cuts.
 ffmpeg writes the MP4.
 
-Run:   uv run --extra analysis photo-ark-timelapse --person "Milo Krauska"
+Run:   uv run --extra analysis photo-ark-timelapse --person "Alice Example"
 Page:  the Timelapse tab of photo-ui (make_app): each month's original photo, the other faces
        looked at, a click to use one of them instead, and Rebuild to render again.
 Out:   ~/.photo-organizer/timelapse/<person>/  (video, picks.json, index.html review sheet,

@@ -25,7 +25,7 @@ def test_find_and_forget_the_faces_in_screenshots(tmp_path):
     conn.execute("INSERT INTO faces (id, sha256, face_idx, x1, y1, x2, y2, det_score) VALUES (9, 'a', 1, 1, 1, 9, 9, 0.9)")
     conn.commit()
     from photo_organizer.analysis import ark_faces
-    ark_faces.name_faces(conn, [9], 'Milo')
+    ark_faces.name_faces(conn, [9], 'Alice')
     cat_path = tmp_path / 'catalog.db'
     cat = sqlite3.connect(cat_path)
     cat.execute("CREATE TABLE files (sha256 TEXT, camera_make TEXT)")

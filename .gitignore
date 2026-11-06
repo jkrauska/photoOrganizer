@@ -1,9 +1,14 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 .old/
 .envrc
 .env
+
+# Local paths and editor/agent settings: never shared.
+config.mk
+.claude/
 
 # Analysis data: personal photos, face embeddings and labels never go in git.
 *.db

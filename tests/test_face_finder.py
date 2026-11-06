@@ -10,11 +10,11 @@ def test_face_finder_lists_photos_with_all_the_chosen_people(tmp_path):
     from photo_organizer.analysis.face_finder import make_app
     db = str(tmp_path / 'analysis.db')
     a = ark.open_db(db)
-    a.executemany("INSERT INTO persons (id, name) VALUES (?, ?)", [(1, 'Joel'), (2, 'Patricia'), (3, 'Milo')])
+    a.executemany("INSERT INTO persons (id, name) VALUES (?, ?)", [(1, 'Alice'), (2, 'Bob'), (3, 'Carol')])
     photos = [('2010/06/2010-06-05/a.jpg', [1, 2, 3]),          # all three
               ('2014/01/2014-01-02/b.jpg', [1, 2, 3, None]),    # all three and a stranger
-              ('2014/01/2014-01-02/c.jpg', [1, 3]),             # no Patricia
-              ('2015/03/2015-03-03/d.jpg', [3, 3]),             # Milo twice
+              ('2014/01/2014-01-02/c.jpg', [1, 3]),             # no Bob
+              ('2015/03/2015-03-03/d.jpg', [3, 3]),             # Carol twice
               ('2015/03/2015-03-03/e.mov', [1, 2, 3])]          # a video frame isn't a photo here
     for i, (rel, people) in enumerate(photos):
         path = tmp_path / 'ark' / rel
@@ -29,7 +29,7 @@ def test_face_finder_lists_photos_with_all_the_chosen_people(tmp_path):
     find = lambda **kw: client.get('/api/find', params=kw).json()
 
     assert client.get('/').status_code == 200
-    assert [p['name'] for p in client.get('/api/persons').json()] == ['Milo', 'Joel', 'Patricia']
+    assert [p['name'] for p in client.get('/api/persons').json()] == ['Carol', 'Alice', 'Bob']
     r = find(p=[1, 2, 3])
     assert [p['sha'] for p in r['items']] == ['h1', 'h0'], "both with all three, newest first"
     assert r['years'] == [[2014, 1], [2010, 1]] and r['items'][0]['day'] == '2014-01-02'

@@ -5,6 +5,7 @@ Writes a parallel metadata.jsonl keyed by uuid. Resumes on rerun.
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,10 +15,11 @@ import urllib.request
 
 from photo_organizer.analysis.paths import add_data_dir_arg, data_paths, load_done_uuids
 
-# Nominatim usage policy: <=1 req/sec and a unique, contactable User-Agent.
+# Nominatim usage policy: <=1 req/sec and a unique, contactable User-Agent. There is no
+# honest default for the contact, so geocoding asks for one.
 # https://operations.osmfoundation.org/policies/nominatim/
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
-NOMINATIM_UA = "photo-organizer/0.1 (jkrauska@gmail.com)"
+NOMINATIM_UA = "photo-organizer/0.1 ({contact})"
 NOMINATIM_DELAY = 1.1
 GEO_CACHE_PRECISION = 3  # decimal places (~110m) for cache key
 
@@ -62,7 +64,7 @@ def extract_latlon(exif: dict) -> tuple[float, float] | None:
         return None
 
 
-def reverse_geocode(lat: float, lon: float, cache: dict) -> dict | None:
+def reverse_geocode(lat: float, lon: float, cache: dict, user_agent: str) -> dict | None:
     key = (round(lat, GEO_CACHE_PRECISION), round(lon, GEO_CACHE_PRECISION))
     if key in cache:
         return cache[key]
@@ -73,7 +75,7 @@ def reverse_geocode(lat: float, lon: float, cache: dict) -> dict | None:
     })
     req = urllib.request.Request(
         f"{NOMINATIM_URL}?{params}",
-        headers={"User-Agent": NOMINATIM_UA, "Accept-Language": "en"},
+        headers={"User-Agent": user_agent, "Accept-Language": "en"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -95,9 +97,19 @@ def main():
                         help="Process at most N records (default: all unprocessed).")
     parser.add_argument("--no-geocode", action="store_true",
                         help="Skip Nominatim reverse-geocoding.")
+    parser.add_argument("--contact", default=os.environ.get("PHOTO_ORGANIZER_CONTACT"),
+                        help="Your real email or project URL for the Nominatim User-Agent, as its "
+                             "usage policy requires; placeholders are answered with 403 "
+                             "(default: $PHOTO_ORGANIZER_CONTACT).")
     add_data_dir_arg(parser)
     args = parser.parse_args()
     paths = data_paths(args)
+
+    if not args.no_geocode and not args.contact:
+        sys.exit("Reverse-geocoding needs a contact for the Nominatim User-Agent: pass --contact "
+                 "with your real email or project URL (or set $PHOTO_ORGANIZER_CONTACT), or pass "
+                 "--no-geocode. Nominatim answers 403 to placeholder contacts.")
+    user_agent = NOMINATIM_UA.format(contact=args.contact)
 
     if not shutil.which("exiftool"):
         sys.exit("exiftool not found in PATH. Install with: brew install exiftool")
@@ -135,7 +147,7 @@ def main():
             if latlon:
                 entry["latitude"], entry["longitude"] = latlon
                 if not args.no_geocode:
-                    entry["location"] = reverse_geocode(*latlon, geo_cache)
+                    entry["location"] = reverse_geocode(*latlon, geo_cache, user_agent)
 
             out.write(json.dumps(entry) + "\n")
             out.flush()

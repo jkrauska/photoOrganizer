@@ -1,0 +1,12 @@
+# Copy to config.mk (gitignored) and point these at your own disks.
+# The Makefile includes config.mk if it exists; the command line still wins.
+
+# Folders to empty, comma-separated (paths may contain spaces).
+SOURCES ?= /Volumes/Backup/Pictures,/Volumes/OldLaptop/Photos
+
+# Root of the canonical store, laid out as YYYY/MM/YYYY-MM-DD/.
+DEST ?= /Volumes/photoArk
+
+# Your real email or project URL for the Nominatim User-Agent, required by its usage policy
+# when geocoding; placeholder contacts are answered with 403.
+# export PHOTO_ORGANIZER_CONTACT = me@my-real-domain.example

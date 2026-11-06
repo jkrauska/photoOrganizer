@@ -210,7 +210,7 @@ def main():
     parser.add_argument('--db', default=DEFAULT_DB_PATH)
     sub = parser.add_subparsers(dest='cmd', required=True)
     p_run = sub.add_parser('run', help='Read camera tags of stored files on the NAS (resumable)')
-    p_run.add_argument('--dest', default='/Volumes/photoArk')
+    p_run.add_argument('--dest', required=True, help='root of the canonical store')
     p_run.add_argument('--batch', type=int, default=20, help='Files per batch (one progress line each)')
     p_run.add_argument('--procs', type=int, default=4, help='Parallel exiftool processes on the NAS')
     p_run.add_argument('--limit', type=int, default=0)

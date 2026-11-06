@@ -5,7 +5,7 @@ organizer's catalog), so they follow a file wherever it sits and survive renames
 
   photo-ark-analyze run --year 2010 [--no-vlm | --no-faces]   analyze stored images (resumable)
   photo-ark-analyze run --spread 10 --no-vlm                    whole store, 10 random images per year per round
-  photo-ark-analyze seed-names                                  suggest names from ~/gemma labels
+  photo-ark-analyze seed-names                                  suggest names from the Apple Photos labels
   photo-ark-analyze cluster                                     group unnamed faces (DBSCAN)
   photo-ark-analyze days [--year 2010]                          summarize random day folders
   photo-ark-analyze stats
@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
+from photo_organizer.analysis.paths import DEFAULT_DATA_DIR
 from photo_organizer.constants import PHOTO_EXTENSIONS, RAW_EXTENSIONS
 from photo_organizer.db import DEFAULT_DB_PATH
 
@@ -338,7 +339,7 @@ def _unpack(blob):
 
 def load_reference_faces(data_dir):
     """{name: {'cluster': [emb, ...], 'manual': [emb, ...]}} from the earlier Apple Photos analysis
-    in data_dir (~/gemma): faces named through a cluster label, and faces named one by one
+    in data_dir: faces named through a cluster label, and faces named one by one
     ('face:UUID:IDX' labels, which override the cluster's name)."""
     data_dir = Path(data_dir).expanduser()
     labels = json.loads((data_dir / 'face_labels.json').read_text())
@@ -506,7 +507,9 @@ def main():
     p.add_argument('--no-vlm', action='store_true')
     p.add_argument('--model', default=DEFAULT_VLM)
     p = sub.add_parser('seed-names', help='suggest names from the earlier Apple Photos labels')
-    p.add_argument('--data-dir', default=os.environ.get('PHOTO_ANALYSIS_DIR', '~/gemma'))
+    p.add_argument('--data-dir', default=DEFAULT_DATA_DIR,
+                   help='Apple Photos analysis sidecars (default: $PHOTO_ANALYSIS_DIR or '
+                        f'{DEFAULT_DATA_DIR})')
     p.add_argument('--threshold', type=float, default=0.5)
     p.add_argument('--margin', type=float, default=0.08, help='lead over the second-best person')
     p = sub.add_parser('cluster', help='group faces (DBSCAN, cosine)')
