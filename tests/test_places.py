@@ -14,7 +14,7 @@ def test_places_filters_by_place_people_years_and_view(tmp_path):
     from photo_organizer.analysis import ark
     from photo_organizer.analysis.places import make_app
     catalog, db = str(tmp_path / 'catalog.db'), str(tmp_path / 'analysis.db')
-    client = TestClient(make_app(catalog, db, tmp_path / 'thumbs'))
+    client = TestClient(make_app(catalog, db, tmp_path / 'thumbs', refresh=0))
     init_db(catalog).close()
     ark.open_db(db).close()
     assert client.get('/api/facets').json()['missing']           # before the first locations run

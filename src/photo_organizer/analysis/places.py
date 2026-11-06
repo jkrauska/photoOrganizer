@@ -11,6 +11,8 @@ The map tiles come from OpenStreetMap in the browser; photo positions are never 
 
 import os
 import sqlite3
+import threading
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -28,39 +30,71 @@ SURE = {'gps': "l.source = 'gps'", 'measured': "l.source IN ('gps', 'day_gps')",
 PHOTO_SQL = '(' + ' OR '.join(f"lower(f.dest_path) LIKE '%{e}'" for e in sorted(PHOTO_EXTENSIONS)) + ')'
 
 
-def connect(catalog, analysis):
-    """The catalog read-only, with analysis.db attached as `a` for the faces."""
-    conn = sqlite3.connect(f"file:{catalog}?mode=ro", uri=True, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("ATTACH DATABASE ? AS a", (f"file:{analysis}?mode=ro",))
-    return conn
+class Snapshot:
+    """The located photos, copied into an in-memory table (one row each, already joined to the
+    catalog and limited to stored photos) with analysis.db attached as `a` for the faces. Rebuilt
+    when the locations change, checked at most every `refresh` seconds. Queries share one
+    connection, so callers hold `lock` while they use it."""
 
+    def __init__(self, catalog, analysis, refresh=60):
+        self.catalog, self.analysis, self.refresh = catalog, analysis, refresh
+        self.lock = threading.Lock()
+        self.conn, self.stamp, self.checked = None, None, 0.0
 
-def has_locations(conn):
-    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'locations'").fetchone())
+    def _stamp(self):
+        with closing(sqlite3.connect(f"file:{self.catalog}?mode=ro", uri=True, timeout=30)) as c:
+            if not c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'locations'").fetchone():
+                return None
+            return tuple(c.execute("SELECT COUNT(*), MAX(located_at) FROM locations").fetchone())
+
+    def _build(self):
+        conn = sqlite3.connect(':memory:', uri=True, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("ATTACH DATABASE ? AS c", (f"file:{self.catalog}?mode=ro",))
+        conn.execute(
+            f"CREATE TABLE snap AS SELECT l.file_id, f.sha256, f.taken_at, substr(f.taken_at, 1, 4) year, "
+            f"f.dest_path, l.lat, l.lon, l.region, l.country, l.state, l.city, l.source, l.confidence "
+            f"FROM c.locations l CROSS JOIN c.files f ON f.id = l.file_id "
+            f"WHERE l.source IS NOT NULL AND f.status = 'done' AND {PHOTO_SQL}")
+        conn.commit()
+        conn.execute("DETACH DATABASE c")
+        for col in ('source', 'region', 'country', 'state', 'city', 'taken_at', 'lat', 'sha256'):
+            conn.execute(f"CREATE INDEX snap_{col} ON snap({col})")
+        conn.execute("ANALYZE main")                   # so a people filter is looked up by sha256
+        conn.execute("ATTACH DATABASE ? AS a", (f"file:{self.analysis}?mode=ro",))
+        return conn
+
+    def get(self):
+        """The connection, or None before the first locations run. Call with lock held."""
+        if self.conn is None or time.monotonic() - self.checked >= self.refresh:
+            self.checked = time.monotonic()
+            stamp = self._stamp()
+            if stamp is None:
+                return None
+            if stamp != self.stamp or self.conn is None:
+                old, self.conn, self.stamp = self.conn, self._build(), stamp
+                if old is not None:
+                    old.close()
+        return self.conn
 
 
 def where(f, skip=None, bbox=True):
     """(SQL, args) for the filters f (a dict of the query's values); skip: one place column left out,
     so its menu lists every choice the other filters allow."""
-    sql = [SURE.get(f.get('sure') or 'measured', SURE['measured']), "f.status = 'done'", PHOTO_SQL]
+    sql = [SURE.get(f.get('sure') or 'measured', SURE['measured'])]
     args = []
     for col in PLACE_COLUMNS:
         if col != skip and f.get(col):
             sql.append(f"l.{col} = ?")
             args.append(f[col])
     if f.get('start'):
-        sql.append("substr(f.taken_at, 1, 4) >= ?")
+        sql.append("l.year >= ?")
         args.append(str(f['start']))
     if f.get('end'):
-        sql.append("substr(f.taken_at, 1, 4) <= ?")
+        sql.append("l.year <= ?")
         args.append(str(f['end']))
-    people = sorted(set(f.get('p') or []))[:MAX_PEOPLE]
-    if people:
-        q = ','.join('?' * len(people))
-        sql.append(f"f.sha256 IN (SELECT sha256 FROM a.faces WHERE person_id IN ({q}) GROUP BY sha256 "
-                   f"HAVING COUNT(DISTINCT person_id) = ?)")
-        args += people + [len(people)]
+    if f.get('p'):
+        sql.append("l.sha256 IN (SELECT sha256 FROM temp.pick)")      # filled by pick_people
     if bbox and f.get('bbox'):
         s, w, n, e = f['bbox']
         sql.append("l.lat BETWEEN ? AND ?")
@@ -74,7 +108,19 @@ def where(f, skip=None, bbox=True):
     return ' AND '.join(sql), args
 
 
-FROM = "locations l CROSS JOIN files f ON f.id = l.file_id"   # CROSS: locations drive the join
+FROM = "snap l"
+
+
+def pick_people(conn, people):
+    """Fill temp.pick with the photos that have every one of people in them (read once per request,
+    not once per menu)."""
+    people = sorted(set(people or []))[:MAX_PEOPLE]
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS pick (sha256 TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM temp.pick")
+    if people:
+        q = ','.join('?' * len(people))
+        conn.execute(f"INSERT INTO temp.pick SELECT sha256 FROM a.faces WHERE person_id IN ({q}) GROUP BY sha256 "
+                     f"HAVING COUNT(DISTINCT person_id) = ?", people + [len(people)])
 
 
 def facets(conn, f):
@@ -87,7 +133,7 @@ def facets(conn, f):
             f"GROUP BY 1 ORDER BY n DESC LIMIT 300", args)]
     sql, args = where({**f, 'start': None, 'end': None}, bbox=False)
     out['years'] = [r[0] for r in conn.execute(
-        f"SELECT DISTINCT substr(f.taken_at, 1, 4) FROM {FROM} WHERE {sql} AND f.taken_at IS NOT NULL ORDER BY 1",
+        f"SELECT DISTINCT l.year FROM {FROM} WHERE {sql} AND l.year IS NOT NULL ORDER BY 1",
         args)]
     sql, args = where(f, bbox=False)
     r = conn.execute(f"SELECT COUNT(*) n, COUNT(l.lat) mapped, MIN(l.lat), MIN(l.lon), MAX(l.lat), MAX(l.lon) "
@@ -103,7 +149,7 @@ def clusters(conn, f, zoom):
     sql, args = where(f)
     rows = conn.execute(
         f"SELECT CAST(floor(l.lat / ?) AS INT) gy, CAST(floor(l.lon / ?) AS INT) gx, COUNT(*) n, AVG(l.lat) lat, "
-        f"AVG(l.lon) lon, MAX(f.taken_at || '|' || f.sha256) last FROM {FROM} WHERE {sql} AND l.lat IS NOT NULL "
+        f"AVG(l.lon) lon, MAX(l.taken_at || '|' || l.sha256) last FROM {FROM} WHERE {sql} AND l.lat IS NOT NULL "
         f"GROUP BY gy, gx ORDER BY n DESC LIMIT 4000", [cell, cell] + args).fetchall()
     # Thumbnails only on the biggest clusters: an uncached RAW preview costs a NAS read each.
     return [{'lat': r['lat'], 'lon': r['lon'], 'n': r['n'], 'sha': (r['last'] or '|').split('|')[-1], 'thumb': k < THUMBS,
@@ -116,8 +162,8 @@ def photos(conn, f, offset=0, limit=120):
     sql, args = where(f)
     total = conn.execute(f"SELECT COUNT(*) FROM {FROM} WHERE {sql}", args).fetchone()[0]
     rows = conn.execute(
-        f"SELECT f.sha256, f.dest_path, f.taken_at, l.city, l.state, l.region, l.country, l.source, l.confidence, "
-        f"l.lat, l.lon FROM {FROM} WHERE {sql} ORDER BY f.taken_at DESC, f.id DESC LIMIT ? OFFSET ?",
+        f"SELECT l.sha256, l.dest_path, l.taken_at, l.city, l.state, l.region, l.country, l.source, l.confidence, "
+        f"l.lat, l.lon FROM {FROM} WHERE {sql} ORDER BY l.taken_at DESC, l.file_id DESC LIMIT ? OFFSET ?",
         args + [limit, offset]).fetchall()
     return total, [{'sha': r['sha256'], 'day': os.path.basename(os.path.dirname(r['dest_path'])),
                     'taken': r['taken_at'], 'place': ', '.join(x for x in (r['city'], r['region'] if r['region'] != r['city']
@@ -126,9 +172,11 @@ def photos(conn, f, offset=0, limit=120):
                    for r in rows]
 
 
-def make_app(catalog, analysis, thumb_dir):
-    """thumb_dir: shared with the days page (same size, same names)."""
+def make_app(catalog, analysis, thumb_dir, refresh=60):
+    """thumb_dir: shared with the days page (same size, same names); refresh: seconds between
+    checks for new locations."""
     thumb_dir = Path(thumb_dir)
+    snapshot = Snapshot(catalog, analysis, refresh)
     app = FastAPI()
 
     def filters(region, country, state, city, p, start, end, sure, bbox):
@@ -144,9 +192,11 @@ def make_app(catalog, analysis, thumb_dir):
                 'end': end, 'sure': sure if sure in SURE else 'measured', 'bbox': b}
 
     def run(fn, *a):
-        with closing(connect(catalog, analysis)) as conn:
-            if not has_locations(conn):
+        with snapshot.lock:
+            conn = snapshot.get()
+            if conn is None:
                 return None
+            pick_people(conn, a[0].get('p'))
             return fn(conn, *a)
 
     @app.get("/api/persons")
@@ -400,7 +450,12 @@ async function loadPhotos(reset) {
   if (offset < total) $('#grid').insertAdjacentHTML('beforeend', '<button class="open" id="more">More</button>');
 }
 
-function view() { writeUrl(); drawMap(); loadPhotos(true); }
+let lastView = '';
+function view() {          // moveend also fires on resizes that don't change what's shown
+  const key = query(true) + '&z=' + map.getZoom() + '&in=' + $('#inview').checked;
+  if (key == lastView) return;
+  lastView = key; writeUrl(); drawMap(); loadPhotos(true);
+}
 map.on('moveend', () => { clearTimeout(timer); timer = setTimeout(view, 150); });
 
 function show(el) {

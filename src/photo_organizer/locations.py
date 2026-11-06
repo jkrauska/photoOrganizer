@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_locations_city ON locations(city);
 
 # Public areas, not anyone's addresses; edit ~/.photo-organizer/regions.json to add your own.
 DEFAULT_REGIONS = [
-    {'name': 'Tahoe', 'center': [39.10, -120.04], 'radius_km': 30,
+    {'name': 'Tahoe', 'center': [39.10, -120.04], 'radius_km': 38,   # takes in Truckee and Donner
      'aliases': ['Lake Tahoe', 'Tahoe', 'South Lake Tahoe', 'Truckee']},
     {'name': 'Yosemite', 'polygon': [[38.19, -119.89], [38.19, -119.20], [37.49, -119.20], [37.49, -119.89]],
      'aliases': ['Yosemite']},
