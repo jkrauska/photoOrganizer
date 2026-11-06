@@ -175,9 +175,11 @@ Code lives under `src/photo_organizer/`:
 - `cleanup.py`: pruning emptied source folders
 - `db.py`: catalog schema, migrations, backup to the destination
 - `progress.py` / `status.py`: live run state and the status web page
+- `cameras.py` / `locations.py`: camera, lens and GPS of stored files, read by exiftool on the NAS;
+  places named offline from GeoNames, regions from `~/.photo-organizer/regions.json`
 - `report.py`, `hashing.py`, `state.py`, `constants.py`
 - `analysis/`: `analyze`, `cluster`, `enrich`, `index`, `face_browser`, plus `paths` for the data directory
-- `analysis/ark*`, `days`, `shuffle`, `timelapse`, `face_finder`, `screenshots`: the same
+- `analysis/ark*`, `days`, `shuffle`, `timelapse`, `face_finder`, `places`, `screenshots`: the same
   analysis over the store itself, and the pages `ui.py` serves
 
 ## Privacy
@@ -186,7 +188,9 @@ Nothing personal is committed: the catalog, the analysis database, captions, fac
 embeddings, face names and crops all live under `~/.photo-organizer/` and are gitignored,
 and local disk paths belong in `config.mk`. Everything runs on your machine except
 reverse-geocoding, which sends only rounded coordinates to Nominatim and can be turned off
-with `--no-geocode`. The web pages bind to `127.0.0.1` unless you pass `--host`; on the LAN
+with `--no-geocode`. `photo-organizer-locations` names places from a GeoNames copy it downloads
+once and sends nothing per photo; the Places page loads its map tiles from OpenStreetMap in the
+browser (only the map area being viewed is requested, never photo positions). The web pages bind to `127.0.0.1` unless you pass `--host`; on the LAN
 they have no authentication, so only do that on a network you trust.
 
 ## License
