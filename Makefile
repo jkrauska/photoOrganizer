@@ -41,7 +41,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
-.PHONY: help sync require-sources inventory run queue queue-photos set-date queue-list cameras cameras-stats worker worker-bg stop verify status enrich faces browse test \
+.PHONY: help sync require-sources inventory run queue queue-photos set-date queue-list cameras cameras-stats locations locations-infer locations-stats worker worker-bg stop verify status enrich faces browse test \
 	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui ui
 
 help:
@@ -53,6 +53,8 @@ help:
 	@echo "make set-date SRC=/path DATE=YYYY-MM-DD   write that date into a folder's undated files (EXIF), then queue it"
 	@echo "make queue-list show the queue"
 	@echo "make cameras    record each stored file's camera + lens, read on the NAS (resumable); cameras-stats: per camera"
+	@echo "make locations  GPS + place (country/state/city/region) of each stored file, read on the NAS (resumable)"
+	@echo "               then infers places for files without GPS; locations-stats: coverage; regions: ~/.photo-organizer/regions.json"
 	@echo "make worker     process the queue in order, then wait for more (worker-bg: in background)"
 	@echo "make stop       stop a running inventory/run/worker gracefully (in-flight files finish)"
 	@echo "make verify     re-read every stored file from the NAS and check its hash"
@@ -106,6 +108,16 @@ cameras: sync
 
 cameras-stats: sync
 	@uv run photo-organizer-cameras --db "$(CATALOG)" stats
+
+locations: sync
+	uv run photo-organizer-locations --db "$(CATALOG)" read --dest "$(DEST)" $(if $(filter-out 0,$(LIMIT)),--limit $(LIMIT))
+	uv run photo-organizer-locations --db "$(CATALOG)" infer
+
+locations-infer: sync
+	uv run photo-organizer-locations --db "$(CATALOG)" infer
+
+locations-stats: sync
+	@uv run photo-organizer-locations --db "$(CATALOG)" stats
 
 queue-list: sync
 	@$(QUEUE) list

@@ -90,9 +90,9 @@ class StayOpen:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding='utf-8', start_new_session=True)   # Ctrl-C stops between batches
 
-    def read(self, paths):
+    def read(self, paths, tags=TAGS, options=()):
         # No -q: it also suppresses the {ready} line that ends each batch.
-        args = ['-json', '-fast', '-charset', 'filename=utf8', *[f'-{t}' for t in TAGS], *paths,
+        args = ['-json', '-fast', *options, '-charset', 'filename=utf8', *[f'-{t}' for t in tags], *paths,
                 '-execute']
         self.proc.stdin.write('\n'.join(args) + '\n')
         self.proc.stdin.flush()
