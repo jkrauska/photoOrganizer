@@ -17,16 +17,23 @@ Never entered: NAS recycle bins and snapshots (`@Recycle`, `@Recently-Snapshot`,
 `@eaDir`, ...) and app bundles whose insides must not move (`.photoslibrary`, `.cocatalog`,
 `.lrdata`, ...). Folders left empty (or holding only `.DS_Store`-style junk) are pruned.
 
+Built for macOS: it reads Apple Photos libraries, uses ExifTool for dates, and the analysis
+side needs Apple Silicon. The organizer itself only needs Python 3.11 and `exiftool`.
+
 ## Setup
 
 ```bash
 uv sync
 brew install exiftool
+cp config.mk.example config.mk   # then put your own SOURCES and DEST in it
 ```
+
+`config.mk` is gitignored, so your paths stay out of the repo. Everything it sets can also
+be passed on the command line (`make run SOURCES=... DEST=...`).
 
 ## Usage
 
-The Makefile wraps the common runs (sources, dest and catalog default to this library):
+The Makefile wraps the common runs:
 
 ```bash
 make inventory              # dry run over all sources
@@ -40,21 +47,24 @@ Logs land in `~/.photo-organizer/logs/`. Under the hood:
 
 ```bash
 # 1. Inventory (dry run): catalog every file, read dates, plan destinations. Nothing moves.
-uv run photo-organizer --source /Volumes/fileshares/photos --source /Volumes/Photowork \
-    --dest /Volumes/<fresh-mount>
+uv run photo-organizer --source /Volumes/Backup/Pictures --source /Volumes/OldLaptop/Photos \
+    --dest /Volumes/photoArk
 
 # 2. Watch progress (images/s, MB/s, ETA, per-source counts, errors) in the browser.
 uv run photo-organizer-status
 
 # 3. Execute: move + verify + delete sources, batch by batch (--yes skips the per-batch prompt).
-uv run photo-organizer --source ... --dest /Volumes/<fresh-mount> --execute
+uv run photo-organizer --source ... --dest /Volumes/photoArk --execute
 ```
+
+Point `--dest` at a disk with room for everything; the store is referred to below as the
+"ark" and nothing outside it is ever written.
 
 Running the inventory first makes the ETA cover the whole job, since every file is
 already cataloged as pending. Runs are resumable: rerun the same command after a crash or
 Ctrl-C (press twice to force quit); files interrupted mid-copy are cleaned up and redone.
 
-A destination folder written by an older run (e.g. `photosCleanup2026`) can be used as a
+A destination folder written by an older run of this tool can be used as a
 source. Its `photo_organizer.db` is read to recover each file's original path and to send
 files that run dated only by mtime to `review` instead of trusting their folder.
 
@@ -120,7 +130,7 @@ scripts/analysis_pipeline.sh                     # full run, resumable
 
 uv run photo-face-browser                        # label face clusters at http://localhost:8000/
 uv run photo-index                               # rebuild photos.db after labeling
-uv run datasette ~/gemma/photos.db -o            # faceted + full-text + map browsing
+make browse                                      # faceted + full-text + map browsing (Datasette)
 ```
 
 Steps (each is its own command and resumable, since everything is keyed by Photos UUID):
@@ -135,10 +145,11 @@ Steps (each is its own command and resumable, since everything is keyed by Photo
 
 ### Data directory
 
-All sidecars live in one directory, `$PHOTO_ANALYSIS_DIR` or `~/gemma` by default
-(override per command with `--data-dir`). That data is personal and is gitignored, so
-it never lands in this repo. Note that `photos.db` here is separate from the organizer's
-catalog: it covers the Apple Photos library keyed by UUID, not the NAS tree.
+All sidecars live in one directory, `$PHOTO_ANALYSIS_DIR` or `~/.photo-organizer/analysis`
+by default (override per command with `--data-dir`). Captions, face embeddings and names are
+personal, so they stay outside the repo and the patterns that match them are gitignored.
+Note that `photos.db` here is separate from the organizer's catalog: it covers the Apple
+Photos library keyed by UUID, not the store tree.
 
 ### Constraints
 
@@ -146,6 +157,11 @@ catalog: it covers the Apple Photos library keyed by UUID, not the NAS tree.
 - `pillow-heif` is required, or every HEIC iPhone photo is silently skipped.
 - RAW files are analyzed through Apple's largest JPEG derivative (`analysis_path`).
 - Gated Hugging Face models need `HF_TOKEN` exported (e.g. via a gitignored `.envrc`).
+- Reverse-geocoding needs a contact for the Nominatim User-Agent, as its
+  [usage policy](https://operations.osmfoundation.org/policies/nominatim/) requires: export
+  `PHOTO_ORGANIZER_CONTACT` (your real email or a project URL) or pass `--contact`, else run
+  with `--no-geocode`. Nominatim answers 403 to placeholder contacts, which shows up as a
+  `_error` location on every geotagged photo.
 
 ## Layout
 
@@ -161,3 +177,18 @@ Code lives under `src/photo_organizer/`:
 - `progress.py` / `status.py`: live run state and the status web page
 - `report.py`, `hashing.py`, `state.py`, `constants.py`
 - `analysis/`: `analyze`, `cluster`, `enrich`, `index`, `face_browser`, plus `paths` for the data directory
+- `analysis/ark*`, `days`, `shuffle`, `timelapse`, `face_finder`, `screenshots`: the same
+  analysis over the store itself, and the pages `ui.py` serves
+
+## Privacy
+
+Nothing personal is committed: the catalog, the analysis database, captions, face
+embeddings, face names and crops all live under `~/.photo-organizer/` and are gitignored,
+and local disk paths belong in `config.mk`. Everything runs on your machine except
+reverse-geocoding, which sends only rounded coordinates to Nominatim and can be turned off
+with `--no-geocode`. The web pages bind to `127.0.0.1` unless you pass `--host`; on the LAN
+they have no authentication, so only do that on a network you trust.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
