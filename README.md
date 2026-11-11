@@ -3,7 +3,8 @@
 Empties ad-hoc photo dumps into one canonical store laid out as `YYYY/MM/YYYY-MM-DD/`,
 tracking every file in a SQLite catalog. A source file is **deleted only after** its bytes
 are proven to be in the store: either its copy was re-hashed and matched, or (for a
-duplicate) the existing canonical copy was re-hashed from disk and matched.
+duplicate) its hash matches the one recorded when the canonical copy was copied and verified,
+and that copy is still there at the same size (it is not read back again).
 
 Anything uncertain stays exactly where it was:
 

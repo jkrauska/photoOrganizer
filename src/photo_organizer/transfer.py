@@ -151,7 +151,7 @@ class TransferContext:
         self.completed = 0
         self.db_lock = threading.Lock()
         self.inflight = {}          # sha256 -> Event set when that content's first copy finishes
-        self.verified = {}          # canonical dest_path -> bool (NAS re-read result this run)
+        self.verified = {}          # canonical dest_path -> bool (canonical_ok result this run)
         self.verify_lock = threading.Lock()
         self.claimed = {}           # lowercased dest_path -> fid: SMB names are case-insensitive
 
@@ -193,10 +193,16 @@ class TransferContext:
         return sorted(items, key=lambda v: v['name'])
 
     def canonical_ok(self, path, sha):
+        """The stored copy a duplicate source matches is still there and still the size it was
+        when it was copied and verified. Its hash recorded then is trusted rather than re-read
+        from the store, which for a duplicate would move the whole file over the network again."""
         with self.verify_lock:
             if path in self.verified:
                 return self.verified[path]
-        ok = self.fs.exists(path) and self.fs.sha256(path, nocache=True) == sha
+        with self.db_lock:
+            row = self.conn.execute("SELECT file_size FROM files WHERE dest_path = ? AND sha256 = ? "
+                                    "AND status = 'done'", (path, sha)).fetchone()
+        ok = bool(row) and self.fs.exists(path) and self.fs.getsize(path) == row['file_size']
         with self.verify_lock:
             self.verified[path] = ok
         return ok

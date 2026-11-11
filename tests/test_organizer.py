@@ -102,6 +102,25 @@ def test_duplicate_source_kept_when_canonical_copy_fails_verification(env):
     assert rows()[str(src / 'b' / 'IMG_1.jpg')]['status'] == 'error'
 
 
+def test_duplicate_removed_without_reading_the_canonical_copy_again(env, monkeypatch):
+    from photo_organizer import transfer
+    src, dest, go, rows = env
+    original = make_jpeg(f"{src}/a/IMG_1.jpg", "2020:01:02 03:04:05")
+    spare = shutil.copy2(original, env[0].parent / 'spare.jpg')
+    go()
+    canonical = str(dest / '2020/01/2020-01-02/IMG_1.jpg')
+    os.makedirs(src / 'b')
+    shutil.copy2(spare, src / 'b' / 'IMG_1.jpg')
+    hashed = []
+    real = transfer.LocalFS.sha256
+    monkeypatch.setattr(transfer.LocalFS, 'sha256', staticmethod(
+        lambda path, nocache=False, progress=None: hashed.append(path) or real(path, nocache, progress)))
+    go()
+    assert not (src / 'b' / 'IMG_1.jpg').exists()
+    assert rows()[str(src / 'b' / 'IMG_1.jpg')]['status'] == 'duplicate_removed'
+    assert hashed and canonical not in hashed, "only the source is hashed; the stored copy's recorded hash is trusted"
+
+
 def test_uncertain_files_are_left_in_place(env):
     src, dest, go, rows = env
     make_jpeg(f"{src}/misc/scan_0001.jpg")                       # no EXIF, no date in name
