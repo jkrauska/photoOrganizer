@@ -379,6 +379,11 @@ class ArkGuessNoIn(BaseModel):
     name: str
 
 
+class ArkRetireIn(BaseModel):
+    name: str
+    retired: bool = True
+
+
 class ArkForgetIn(BaseModel):
     face_ids: list[int] = []
     cluster_id: str | None = None
@@ -431,6 +436,19 @@ def make_ark_app(db_path, crop_dir, catalog_path=None) -> FastAPI:
     def persons():
         with db() as conn:
             return ark_faces.persons(conn)
+
+    @ark.get("/api/retired")
+    def retired():
+        with db() as conn:
+            return ark_faces.retired_persons(conn)
+
+    @ark.post("/api/retire")
+    def retire(body: ArkRetireIn):
+        """Someone I used to know: their clusters leave the naming list (retired=false undoes it)."""
+        with db() as conn:
+            if not ark_faces.set_retired(conn, body.name, body.retired):
+                raise HTTPException(404, "no one has that name")
+        return {"ok": True}
 
     @ark.get("/face/{face_id}.jpg")
     def face(face_id: int):
@@ -556,6 +574,9 @@ ARK_HTML = r"""<!doctype html>
   #stats { color: #888; font-size: 12px; padding: 6px 4px; }
   #sortbar { display: flex; align-items: center; gap: 6px; padding: 4px; font-size: 12px; color: #555; }
   #sortbar select { flex: 1; font-size: 13px; padding: 4px; }
+  #retiredbar { padding: 2px 4px 4px; font-size: 12px; color: #555; }
+  .item.retired { opacity: .55; }
+  #header label.retire { font-size: 13px; color: #555; white-space: nowrap; cursor: pointer; }
 </style></head><body>
 <datalist id="persons"></datalist>
 <div id="viewer" onclick="closeViewer()"><img alt="Loading photo…"><div></div></div>
@@ -571,6 +592,8 @@ ARK_HTML = r"""<!doctype html>
       <option value="recent">Most recent photo</option>
     </select>
   </div>
+  <label id="retiredbar"><input type="checkbox" id="showRetired" onchange="setShowRetired(this.checked)">
+    Show people I used to know <span id="retiredCount"></span></label>
   <div id="list"><div class="empty">Loading…</div></div>
 </div>
 <div id="main"><div class="empty"><h2 style="margin:0 0 12px">Name the people in photoArk</h2><ol style="text-align:left; display:inline-block; line-height:1.8"><li>Click a cluster in the left sidebar.</li><li>Type the person's name and press <kbd>Enter</kbd> to name every face in it and jump to the next unnamed cluster.</li><li>Name single faces under each crop; accept ✓ or reject ✗ suggested names.</li><li>Double-click a crop to see the whole photo; ← → step through the group's photos, b hides or shows the face box, Esc or click closes.</li><li>Strangers or false detections: ✕ on a crop forgets it; click crops to select several, then <b>Forget selected</b>. Forgotten faces are deleted from the database.</li></ol></div></div>
@@ -579,7 +602,8 @@ let clusters = [];
 let currentId = null;
 let faces = [];
 let sortBy = 'count';
-try { sortBy = localStorage.getItem('arkSort') || 'count'; } catch (e) {}
+let showRetired = false;
+try { sortBy = localStorage.getItem('arkSort') || 'count'; showRetired = localStorage.getItem('arkShowRetired') === '1'; } catch (e) {}
 
 const SORTS = {
   count: (a, b) => b.count - a.count,
@@ -593,8 +617,21 @@ const SORTS = {
 
 function sortedClusters() {
   // Unclustered stays at the bottom whatever the order.
-  const real = clusters.filter(c => c.id !== 'unclustered').sort(SORTS[sortBy] || SORTS.count);
+  // People I used to know stay out of the list (and so out of Save & Next) unless asked for.
+  const real = clusters.filter(c => c.id !== 'unclustered' && (showRetired || !c.retired))
+                       .sort(SORTS[sortBy] || SORTS.count);
   return real.concat(clusters.filter(c => c.id === 'unclustered'));
+}
+
+function setShowRetired(v) {
+  showRetired = v;
+  try { localStorage.setItem('arkShowRetired', v ? '1' : '0'); } catch (e) {}
+  renderSidebar();
+}
+
+async function setRetired(name, retired) {
+  await post('api/retire', {name, retired});
+  await loadClusters();
 }
 
 function setSort(v) {
@@ -631,11 +668,14 @@ async function loadPersons() {
 function renderSidebar() {
   const sb = document.getElementById('list');
   document.getElementById('sort').value = sortBy;
+  document.getElementById('showRetired').checked = showRetired;
+  const nRetired = new Set(clusters.filter(c => c.retired).map(c => c.label)).size;
+  document.getElementById('retiredCount').textContent = nRetired ? `(${nRetired})` : '';
   const named = clusters.filter(c => c.label).length;
   const real = clusters.filter(c => c.id !== 'unclustered').length;
   sb.innerHTML = `<div id="stats">${named}/${real} clusters named · click one to name it</div>` +
     sortedClusters().map(c => `
-      <div class="item ${c.id===currentId?'active':''}" onclick="selectCluster('${c.id}')">
+      <div class="item ${c.id===currentId?'active':''} ${c.retired?'retired':''}" onclick="selectCluster('${c.id}')">
         <img src="${c.sample}" loading="lazy">
         <div class="meta">
           <div class="label ${c.label?'':'unlabeled'}">${c.id==='unclustered' ? 'Unclustered faces' : (escapeHtml(c.label) || '(unnamed) ' + c.id)}</div>
@@ -658,6 +698,9 @@ async function selectCluster(id) {
            <input id="labelInput" list="persons" placeholder="Name for the whole cluster…" value="${escapeHtml(c.label)}">
            <button onclick="saveLabel(false)">Save</button>
            <button class="primary" onclick="saveLabel(true)">Save &amp; Next ⏎</button>
+           ${c.label ? `<label class="retire" title="Keep the name, but leave this person out of the naming list">
+             <input type="checkbox" ${c.retired?'checked':''} onchange="setRetired(${escapeHtml(JSON.stringify(c.label))}, this.checked)">
+             Someone I used to know</label>` : ''}
          </div>`}
       <div class="row" id="suggRow"></div>
       <div class="row" id="forgetRow"></div>

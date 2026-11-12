@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS images (
 );
 CREATE TABLE IF NOT EXISTS persons (
     id INTEGER PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL
+    name TEXT UNIQUE NOT NULL,
+    retired INTEGER NOT NULL DEFAULT 0   -- "someone I used to know": out of the naming list
 );
 CREATE TABLE IF NOT EXISTS faces (
     id INTEGER PRIMARY KEY,
@@ -90,6 +91,9 @@ def open_db(path=DEFAULT_ANALYSIS_DB):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    if 'retired' not in {r[1] for r in conn.execute("PRAGMA table_info(persons)")}:
+        conn.execute("ALTER TABLE persons ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
     return conn
 
 

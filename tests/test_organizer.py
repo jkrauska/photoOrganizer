@@ -803,6 +803,38 @@ def test_ark_faces_forget_deletes_faces_and_crops_but_keeps_named_ones(tmp_path)
     assert [c['id'] for c in ark_faces.list_clusters(conn)] == ['c0']
 
 
+def test_ark_faces_someone_i_used_to_know_leaves_the_naming_list_but_keeps_the_name(tmp_path):
+    pytest.importorskip('fastapi')
+    pytest.importorskip('httpx')
+    from fastapi.testclient import TestClient
+    from photo_organizer.analysis.face_browser import make_ark_app
+    db, conn = _ark_face_db(tmp_path)
+    client = TestClient(make_ark_app(db, tmp_path / 'crops'))
+    client.post('/api/label', json={'cluster_id': 'c0', 'label': 'Alice'})
+    assert [c['retired'] for c in client.get('/api/clusters').json()] == [False, False]
+    assert client.post('/api/retire', json={'name': 'Alice'}).json()['ok']
+    c0, rest = client.get('/api/clusters').json()
+    assert c0['label'] == 'Alice' and c0['retired'] and not rest['retired']
+    assert client.get('/api/retired').json() == ['Alice']
+    assert _ark_names(conn)[1] == ('Alice', 'manual'), "faces keep the name"
+    assert client.post('/api/retire', json={'name': 'Nobody'}).status_code == 404
+    client.post('/api/retire', json={'name': 'Alice', 'retired': False})
+    assert not client.get('/api/clusters').json()[0]['retired']
+    page = client.get('/').text
+    assert 'Someone I used to know' in page and 'showRetired' in page
+
+
+def test_open_db_adds_the_retired_column_to_an_older_analysis_db(tmp_path):
+    import sqlite3
+    from photo_organizer.analysis import ark
+    db = str(tmp_path / 'old.db')
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE persons (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL)")
+        c.execute("INSERT INTO persons (name) VALUES ('Alice')")
+    conn = ark.open_db(db)
+    assert conn.execute("SELECT name, retired FROM persons").fetchall()[0][:] == ('Alice', 0)
+
+
 def test_ark_face_browser_app_names_over_http(tmp_path):
     pytest.importorskip('fastapi')
     pytest.importorskip('httpx')

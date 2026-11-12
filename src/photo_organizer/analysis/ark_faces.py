@@ -106,6 +106,7 @@ def list_clusters(conn):
     latest = _cluster_latest(conn)
     # Each cluster's name (see _cluster_name) from one grouped query, not two per cluster.
     names = dict(conn.execute("SELECT id, name FROM persons").fetchall())
+    retired = {r[0] for r in conn.execute("SELECT id FROM persons WHERE retired")}
     top = {}
     for cid, pid, n in conn.execute("SELECT cluster_id, person_id, COUNT(*) FROM faces "
                                     "WHERE person_source = 'manual' AND cluster_id IS NOT NULL "
@@ -118,6 +119,7 @@ def list_clusters(conn):
                  'label': '' if cid == UNCLUSTERED or top.get(r['cluster_id'], (0, 0))[1] * 2 <= r['n']
                  else names[top[r['cluster_id']][0]],
                  'sample': f"face/{r['sample']}.jpg", 'latest': latest.get(r['cluster_id'], '')}
+        entry['retired'] = bool(entry['label']) and top[r['cluster_id']][0] in retired
         if cid == UNCLUSTERED:
             tail = entry
         else:
@@ -267,6 +269,18 @@ def cluster_detail(conn, cid, limit=500, catalog_path=None):
 
 def persons(conn):
     return [r[0] for r in conn.execute("SELECT name FROM persons ORDER BY name")]
+
+
+def retired_persons(conn):
+    return [r[0] for r in conn.execute("SELECT name FROM persons WHERE retired ORDER BY name")]
+
+
+def set_retired(conn, name, retired=True):
+    """Mark a named person as someone I used to know (or bring them back). Their clusters leave
+    the naming list; their faces keep the name. Returns False if no one has that name."""
+    cur = conn.execute("UPDATE persons SET retired = ? WHERE name = ?", (int(bool(retired)), name.strip()))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def name_faces(conn, face_ids, name):
