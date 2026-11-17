@@ -22,6 +22,7 @@ from photo_organizer.analysis.ark import _centroid, _person_id, _unit_rows, _unp
 
 UNCLUSTERED = 'unclustered'
 CROP_THUMB_SIZE = 256
+BLUR_MIN = 10           # faces less sharp than this (ark.face_sharpness) aren't shown: not worth it
 FULL_MAX_SIDE = 2048
 # "Is this X?" is asked only for a clear match: cosine between the cluster's centre and the centre
 # of X's hand-named faces, and its lead over the next person. Measured on the 2010-2017 data, true
@@ -44,8 +45,9 @@ def ensure_db(db_path):
     plus an index covering the cluster list's columns, so it never reads the embeddings."""
     conn = open_db(db_path)
     try:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_cluster_cover "
-                     "ON faces(cluster_id, det_score, person_source, person_id, sha256, id)")
+        conn.execute("DROP INDEX IF EXISTS idx_faces_cluster_cover")     # before sharpness
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_cluster_cover2 "
+                     "ON faces(cluster_id, det_score, person_source, person_id, sha256, sharpness, id)")
         conn.commit()
     finally:
         conn.close()
@@ -108,9 +110,9 @@ def list_clusters(conn, min_faces=0):
     left out."""
     rows = conn.execute(
         "SELECT cluster_id, COUNT(*) n, SUM(person_source = 'manual') named, "
-        "SUM(person_source = 'suggested') suggested, "
+        "SUM(person_source = 'suggested') suggested, TOTAL(sharpness < ?) blurry, "
         "id sample, MAX(det_score) "        # SQLite: a bare column comes from the MAX() row
-        "FROM faces f GROUP BY cluster_id").fetchall()
+        "FROM faces f GROUP BY cluster_id", (BLUR_MIN,)).fetchall()
     items, tail = [], None
     latest = _cluster_latest(conn)
     # Each cluster's name (see _cluster_name) from one grouped query, not two per cluster.
@@ -126,6 +128,7 @@ def list_clusters(conn, min_faces=0):
     for r in rows:
         cid = UNCLUSTERED if r['cluster_id'] is None else f"c{r['cluster_id']}"
         entry = {'id': cid, 'count': r['n'], 'named': r['named'] or 0, 'suggested': r['suggested'] or 0,
+                 'blurry': int(r['blurry']),
                  'label': '' if cid == UNCLUSTERED or top.get(r['cluster_id'], (0, 0))[1] * 2 <= r['n']
                  else names[top[r['cluster_id']][0]],
                  'sample': f"face/{r['sample']}.jpg", 'latest': latest.get(r['cluster_id'], '')}
@@ -152,7 +155,7 @@ def _by_person(items):
         group.sort(key=lambda x: (-x['count'], x['id']))
         top = group[0]
         out.append(dict(top, id='+'.join(e['id'] for e in group), groups=len(group),
-                        **{k: sum(e[k] for e in group) for k in ('count', 'named', 'suggested')},
+                        **{k: sum(e[k] for e in group) for k in ('count', 'named', 'suggested', 'blurry')},
                         latest=max(e['latest'] for e in group)))
     return out
 
@@ -258,20 +261,21 @@ def _bursts(rows, taken, min_iou=BURST_IOU):
     return {k: v for k, v in out.items() if v}
 
 
-def cluster_detail(conn, cid, limit=500, catalog_path=None):
+def cluster_detail(conn, cid, limit=500, catalog_path=None, min_sharp=BLUR_MIN):
     """Faces of a cluster: not yet named by hand first (the ones to review), then the named ones
     grouped by name. The unnamed ones come in similarity bands of 0.1 (to the cluster's name or
     guessed name, else to the cluster's average face), most similar band first and in shooting
     order within a band (catalog_path gives the times), so a shoot's wrong matches sit together;
     unclustered faces go by detection score. Faces of one burst (same second, same place) come
-    as one entry whose 'burst' lists the other face ids; naming or forgetting it covers them all."""
+    as one entry whose 'burst' lists the other face ids; naming or forgetting it covers them all.
+    Faces less sharp than min_sharp are left out (not yet scored ones are shown)."""
     where, params = _cluster_where(cid)
     rows = conn.execute(
         f"SELECT f.id, f.sha256, f.face_idx, f.det_score, f.person_source, f.person_score, f.embedding, "
         f"f.x1, f.y1, f.x2, f.y2, "
         f"p.name, i.path FROM faces f JOIN images i ON i.sha256 = f.sha256 "
-        f"LEFT JOIN persons p ON p.id = f.person_id WHERE {where} "
-        f"ORDER BY f.person_source IS 'manual', p.name, f.det_score DESC, f.id", params).fetchall()
+        f"LEFT JOIN persons p ON p.id = f.person_id WHERE {where} AND (f.sharpness IS NULL OR f.sharpness >= ?) "
+        f"ORDER BY f.person_source IS 'manual', p.name, f.det_score DESC, f.id", (*params, min_sharp)).fetchall()
     todo = [r for r in rows if r['person_source'] != 'manual']
     named = [r for r in rows if r['person_source'] == 'manual']
     sim, sim_to, taken, bursts = {}, '', {}, {}
@@ -365,7 +369,9 @@ def name_cluster(conn, cid, name, only=None):
         f"SELECT f.id FROM faces f WHERE {where} AND (f.person_source IS NOT 'manual' OR f.person_id IS ?)",
         (*params, old_pid))]
     if only is not None:
-        only = set(only)
+        # The blurry faces the page doesn't show go with the cluster too.
+        only = set(only) | {r[0] for r in conn.execute(
+            f"SELECT f.id FROM faces f WHERE {where} AND f.sharpness < ?", (*params, BLUR_MIN))}
         ids = [i for i in ids if i in only]
     return name_faces(conn, ids, name) if ids else 0
 

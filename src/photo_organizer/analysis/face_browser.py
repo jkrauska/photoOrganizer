@@ -785,7 +785,9 @@ async function loadFaces() {
   const named = faces.filter(f => f.source === 'manual');
   const c = clusters.find(x => x.id === currentId);
   const shown = shownIds().length;
-  const more = c && c.count > shown ? ` <small>· showing ${shown} of ${c.count}</small>` : '';
+  const sharp = c ? c.count - (c.blurry || 0) : 0;
+  const more = (c && sharp > shown ? ` <small>· showing ${shown} of ${sharp}</small>` : '') +
+               (c && c.blurry ? ` <small>· ${c.blurry} too blurry to show</small>` : '');
   const heading = (text, note = '') => `<h3>${text}${note}</h3>`;
   let lastName = null;
   const groups = [];
@@ -1029,7 +1031,8 @@ async function saveLabel(advance) {
   await loadClusters();
   // A name someone already has folds this cluster into that person's row (a new id).
   currentId = rowOf(currentId)?.id || currentId;
-  const total = clusters.find(c => c.id === currentId)?.count || 0;
+  const row = clusters.find(c => c.id === currentId);
+  const total = row ? row.count - (row.blurry || 0) : 0;      // blurry ones are named along with it
   if (advance && total <= shownIds().length) {
     const ids = new Set(clusters.map(c => c.id));
     const next = before.slice(idx + 1).find(x => !x.label && x.id !== 'unclustered' && ids.has(x.id))

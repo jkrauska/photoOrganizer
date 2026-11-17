@@ -41,7 +41,7 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
-.PHONY: help sync require-sources inventory run queue queue-photos set-date queue-list cameras cameras-stats locations locations-infer locations-stats worker worker-bg ark-follow stop verify status enrich faces browse test \
+.PHONY: help sync require-sources inventory run queue queue-photos set-date queue-list cameras cameras-stats locations locations-infer locations-stats worker worker-bg ark-follow ark-sharpness stop verify status enrich faces browse test \
 	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui ui
 
 help:
@@ -66,6 +66,7 @@ help:
 	@echo "make ark-faces  faces for one store year (YEAR=2010); ark-describe adds Gemma, in background"
 	@echo "make ark-faces-spread  faces for the whole store, SPREAD=10 random images per year per round, in background"
 	@echo "make ark-days   Gemma summaries of random day folders (whole store, or DAYS_YEAR=2010), in background"
+	@echo "make ark-sharpness  score how crisp each face found earlier is (blurry ones are hidden), in background"
 	@echo "make ark-follow  while the queue worker runs: faces, clustering and day summaries for new photos, every 10 min"
 	@echo "make ark-seed   suggest names from the Apple Photos labels; ark-stats shows counts"
 	@echo "make ark-faces-ui  name face clusters in the photoArk analysis DB (http://$(shell hostname):$(FACES_PORT))"
@@ -171,6 +172,11 @@ ark-describe: | $(LOGDIR)
 ark-days: | $(LOGDIR)
 	@nohup uv run photo-ark-analyze days $(if $(DAYS_YEAR),--year $(DAYS_YEAR)) > "$(LOGDIR)/ark-days-$(STAMP).log" 2>&1 & \
 		echo "Day summaries running in background (pid $$!), log: $(LOGDIR)/ark-days-$(STAMP).log"
+
+ark-sharpness: | $(LOGDIR)
+	uv sync --quiet --extra analysis
+	@nohup uv run photo-ark-analyze sharpness > "$(LOGDIR)/ark-sharpness-$(STAMP).log" 2>&1 & \
+		echo "Scoring face sharpness in background (pid $$!), log: $(LOGDIR)/ark-sharpness-$(STAMP).log"
 
 ark-follow: | $(LOGDIR)
 	uv sync --quiet --extra analysis

@@ -823,6 +823,27 @@ def test_ark_faces_one_row_per_named_person_across_their_clusters(tmp_path):
         ark_faces.cluster_detail(conn, 'c0+x1')
 
 
+def test_ark_face_sharpness_scores_blur_low():
+    from PIL import ImageFilter
+    from photo_organizer.analysis.ark import face_sharpness
+    rng = __import__('numpy').random.default_rng(0)
+    im = Image.fromarray((rng.random((200, 200, 3)) * 255).astype('uint8'))
+    crisp = face_sharpness(im, (20, 20, 180, 180))
+    soft = face_sharpness(im.filter(ImageFilter.GaussianBlur(4)), (20, 20, 180, 180))
+    assert crisp > 100 > soft and face_sharpness(im, (5, 5, 6, 6)) == 0.0
+
+
+def test_ark_faces_too_blurry_faces_are_hidden_but_named_with_their_cluster(tmp_path):
+    from photo_organizer.analysis import ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    conn.execute("UPDATE faces SET sharpness = CASE id WHEN 2 THEN 3 ELSE 50 END")
+    conn.commit()
+    assert sorted(f['id'] for f in ark_faces.cluster_detail(conn, 'c0')) == [1, 3]
+    assert ark_faces.list_clusters(conn)[0]['blurry'] == 1
+    assert ark_faces.name_cluster(conn, 'c0', 'Alice', only=[1, 3]) == 3, "the hidden blurry one too"
+    assert sorted(f['id'] for f in ark_faces.cluster_detail(conn, 'c0', min_sharp=0)) == [1, 2, 3]
+
+
 def test_ark_faces_family_is_flagged_on_the_named_cluster(tmp_path):
     from photo_organizer.analysis import ark_faces
     db, conn = _ark_face_db(tmp_path)

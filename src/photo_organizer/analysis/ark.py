@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS faces (
     person_id INTEGER REFERENCES persons(id),
     person_source TEXT,                      -- 'manual' | 'suggested' | 'cluster'
     person_score REAL,
+    sharpness REAL,                          -- face_sharpness: low is blurred, tiny or out of focus
     UNIQUE (sha256, face_idx)
 );
 CREATE TABLE IF NOT EXISTS face_not_person (   -- "No, this isn't them" answers in the face UI
@@ -96,6 +97,9 @@ def open_db(path=DEFAULT_ANALYSIS_DB):
         if col not in cols:
             conn.execute(f"ALTER TABLE persons ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
             conn.commit()
+    if 'sharpness' not in {r[1] for r in conn.execute("PRAGMA table_info(faces)")}:
+        conn.execute("ALTER TABLE faces ADD COLUMN sharpness REAL")
+        conn.commit()
     return conn
 
 
@@ -243,15 +247,69 @@ class VisionModel:
 
 # --- analysis --------------------------------------------------------------------------------
 
-def _store_faces(conn, sha, faces):
+SHARP_SIDE = 96     # faces are scored at this size, so a small face scaled up scores as soft
+
+
+def face_sharpness(im, bbox):
+    """How crisp a face is: variance of the Laplacian of its box, grey and scaled to SHARP_SIDE
+    square. Blurred, out-of-focus and tiny faces score low."""
+    x1, y1, x2, y2 = (int(round(v)) for v in bbox)
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(im.width, x2), min(im.height, y2)
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return 0.0
+    a = np.asarray(im.crop((x1, y1, x2, y2)).convert('L').resize((SHARP_SIDE, SHARP_SIDE), Image.BILINEAR),
+                   dtype=np.float32)
+    lap = a[:-2, 1:-1] + a[2:, 1:-1] + a[1:-1, :-2] + a[1:-1, 2:] - 4 * a[1:-1, 1:-1]
+    return round(float(lap.var()), 1)
+
+
+def _store_faces(conn, sha, faces, im=None):
     conn.execute("DELETE FROM faces WHERE sha256 = ? AND person_source IS NOT 'manual'", (sha,))
     for i, f in enumerate(faces):
         x1, y1, x2, y2 = f['bbox']
         conn.execute(
-            "INSERT OR IGNORE INTO faces (sha256, face_idx, x1, y1, x2, y2, det_score, age, gender, embedding) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO faces (sha256, face_idx, x1, y1, x2, y2, det_score, age, gender, embedding, "
+            "sharpness) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (sha, i, x1, y1, x2, y2, f['det_score'], f['age'], f['gender'],
-             np.asarray(f['embedding'], dtype=np.float32).tobytes()))
+             np.asarray(f['embedding'], dtype=np.float32).tobytes(),
+             None if im is None else face_sharpness(im, f['bbox'])))
+
+
+def backfill_sharpness(conn, workers=8, log=print):
+    """Score the faces found before sharpness was recorded, newest folders first. Images load
+    in parallel (it is mostly waiting on the store); the scores are written here. Returns faces scored."""
+    from concurrent.futures import ThreadPoolExecutor
+    todo = conn.execute("SELECT i.sha256, i.path FROM images i WHERE EXISTS (SELECT 1 FROM faces f "
+                        "WHERE f.sha256 = i.sha256 AND f.sharpness IS NULL) ORDER BY i.path DESC").fetchall()
+    log(f"{len(todo):,} images with faces to score")
+
+    def score(row):
+        sha, path = row
+        boxes = boxes_of[sha]
+        try:
+            im, _ = load_image(path)
+        except Exception as e:
+            return sha, None, f"{type(e).__name__}: {e}"
+        return sha, [(face_sharpness(im, b), fid) for fid, b in boxes], None
+
+    boxes_of = {}
+    for fid, sha, *b in conn.execute("SELECT id, sha256, x1, y1, x2, y2 FROM faces WHERE sharpness IS NULL"):
+        boxes_of.setdefault(sha, []).append((fid, b))
+    start, n, failed = time.time(), 0, 0
+    with ThreadPoolExecutor(workers) as ex:
+        for i, (sha, scores, err) in enumerate(ex.map(score, todo), 1):
+            if err:
+                failed += 1
+            else:
+                conn.executemany("UPDATE faces SET sharpness = ? WHERE id = ?", scores)
+                n += len(scores)
+            if i % 200 == 0 or i == len(todo):
+                conn.commit()
+                rate = i / (time.time() - start)
+                log(f"[{i}/{len(todo)}] {n:,} faces scored, {failed} unreadable "
+                    f"({rate:.2f}/s, {(len(todo) - i) / rate / 60:.0f} min left)")
+    conn.commit()
+    return n
 
 
 def _list_json(v):
@@ -295,7 +353,7 @@ def analyze_one(conn, sha, path, face_fn=None, vlm_fn=None, vlm_name=None, tmpdi
     conn.execute("UPDATE images SET width = ?, height = ?, source = ?, error = NULL WHERE sha256 = ?",
                  (im.width, im.height, source, sha))
     if faces is not None:
-        _store_faces(conn, sha, faces)
+        _store_faces(conn, sha, faces, im)
         conn.execute(f"UPDATE images SET face_model = ?, faces_at = {NOW} WHERE sha256 = ?", (FACE_MODEL, sha))
     if r is not None:
         raw = r.get('_raw_response') if r.get('_parse_error') else None
@@ -533,6 +591,8 @@ def main():
     p.add_argument('--max-samples', type=int, default=9, help='frames captioned per day at most')
     p.add_argument('--seed', type=int, help='fix the random day order')
     p.add_argument('--model', default=DEFAULT_VLM)
+    p = sub.add_parser('sharpness', help='score how crisp each face found earlier is')
+    p.add_argument('--workers', type=int, default=8)
     sub.add_parser('stats')
     args = parser.parse_args()
 
@@ -565,6 +625,8 @@ def main():
             print(f"  {name:<24} {note}")
         counts = seed_names(conn, centroids, args.threshold, args.margin)
         print(f"Suggested names for {sum(counts.values()):,} faces: {counts}")
+    elif args.cmd == 'sharpness':
+        print(f"{backfill_sharpness(conn, args.workers, log=lambda s: print(s, flush=True)):,} faces scored")
     elif args.cmd == 'cluster':
         print(f"{cluster_faces(conn, args.eps, args.min_samples):,} clusters")
     stats(conn)
