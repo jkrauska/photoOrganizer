@@ -91,9 +91,11 @@ def open_db(path=DEFAULT_ANALYSIS_DB):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
-    if 'retired' not in {r[1] for r in conn.execute("PRAGMA table_info(persons)")}:
-        conn.execute("ALTER TABLE persons ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(persons)")}
+    for col in ('retired', 'family'):       # someone I used to know; family, listed first
+        if col not in cols:
+            conn.execute(f"ALTER TABLE persons ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
     return conn
 
 

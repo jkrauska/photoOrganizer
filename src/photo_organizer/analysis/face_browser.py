@@ -389,6 +389,11 @@ class ArkRetireIn(BaseModel):
     retired: bool = True
 
 
+class ArkFamilyIn(BaseModel):
+    name: str
+    family: bool = True
+
+
 class ArkForgetIn(BaseModel):
     face_ids: list[int] = []
     cluster_id: str | None = None
@@ -463,6 +468,14 @@ def make_ark_app(db_path, crop_dir, catalog_path=None) -> FastAPI:
         """Someone I used to know: their clusters leave the naming list (retired=false undoes it)."""
         with db() as conn:
             if not ark_faces.set_retired(conn, body.name, body.retired):
+                raise HTTPException(404, "no one has that name")
+        return {"ok": True}
+
+    @ark.post("/api/family")
+    def family(body: ArkFamilyIn):
+        """Family: their clusters go to the top of the list (family=false undoes it)."""
+        with db() as conn:
+            if not ark_faces.set_family(conn, body.name, body.family):
                 raise HTTPException(404, "no one has that name")
         return {"ok": True}
 
@@ -592,6 +605,7 @@ ARK_HTML = r"""<!doctype html>
   #sortbar select { flex: 1; font-size: 13px; padding: 4px; }
   #retiredbar { padding: 2px 4px 4px; font-size: 12px; color: #555; }
   .item.retired { opacity: .55; }
+  .family { color: #c0392b; font-size: 12px; }
   #header label.retire { font-size: 13px; color: #555; white-space: nowrap; cursor: pointer; }
 </style></head><body>
 <datalist id="persons"></datalist>
@@ -634,8 +648,10 @@ const SORTS = {
 function sortedClusters() {
   // Unclustered stays at the bottom whatever the order.
   // People I used to know stay out of the list (and so out of Save & Next) unless asked for.
+  // Family comes first, each part in the chosen order.
+  const sort = SORTS[sortBy] || SORTS.count;
   const real = clusters.filter(c => c.id !== 'unclustered' && (showRetired || !c.retired))
-                       .sort(SORTS[sortBy] || SORTS.count);
+                       .sort((a, b) => (b.family - a.family) || sort(a, b));
   return real.concat(clusters.filter(c => c.id === 'unclustered'));
 }
 
@@ -647,6 +663,11 @@ function setShowRetired(v) {
 
 async function setRetired(name, retired) {
   await post('api/retire', {name, retired});
+  await loadClusters();
+}
+
+async function setFamily(name, family) {
+  await post('api/family', {name, family});
   await loadClusters();
 }
 
@@ -703,7 +724,7 @@ function renderSidebar() {
       <div class="item ${c.id===currentId?'active':''} ${c.retired?'retired':''}" onclick="selectCluster('${c.id}')">
         <img src="${c.sample}" loading="lazy">
         <div class="meta">
-          <div class="label ${c.label?'':'unlabeled'}">${c.id==='unclustered' ? 'Unclustered faces' : (escapeHtml(c.label) || '(unnamed) ' + c.id)}</div>
+          <div class="label ${c.label?'':'unlabeled'}">${c.id==='unclustered' ? 'Unclustered faces' : (escapeHtml(c.label) || '(unnamed) ' + c.id)}${c.family ? ' <span class="family" title="Family">♥</span>' : ''}</div>
           <div class="count">${c.count} face${c.count===1?'':'s'}${c.named?' · '+c.named+' named':''}${c.suggested?' · '+c.suggested+' suggested':''}${sortBy==='recent' && c.latest ? ' · newest '+c.latest : ''}</div>
         </div>
       </div>`).join('');
@@ -725,7 +746,10 @@ async function selectCluster(id) {
            <button class="primary" onclick="saveLabel(true)">Save &amp; Next ⏎</button>
            ${c.label ? `<label class="retire" title="Keep the name, but leave this person out of the naming list">
              <input type="checkbox" ${c.retired?'checked':''} onchange="setRetired(${escapeHtml(JSON.stringify(c.label))}, this.checked)">
-             Someone I used to know</label>`
+             Someone I used to know</label>
+             <label class="retire" title="List this person at the top">
+             <input type="checkbox" ${c.family?'checked':''} onchange="setFamily(${escapeHtml(JSON.stringify(c.label))}, this.checked)">
+             Family</label>`
              : `<button title="Name them 'Someone I used to know #N' and leave them out of the naming list" onclick="retireCluster('${c.id}')">Someone I used to know</button>`}
          </div>`}
       <div class="row" id="suggRow"></div>

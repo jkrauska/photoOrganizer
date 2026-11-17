@@ -109,6 +109,7 @@ def list_clusters(conn, min_faces=0):
     # Each cluster's name (see _cluster_name) from one grouped query, not two per cluster.
     names = dict(conn.execute("SELECT id, name FROM persons").fetchall())
     retired = {r[0] for r in conn.execute("SELECT id FROM persons WHERE retired")}
+    family = {r[0] for r in conn.execute("SELECT id FROM persons WHERE family")}
     top = {}
     for cid, pid, n in conn.execute("SELECT cluster_id, person_id, COUNT(*) FROM faces "
                                     "WHERE person_source = 'manual' AND cluster_id IS NOT NULL "
@@ -122,6 +123,7 @@ def list_clusters(conn, min_faces=0):
                  else names[top[r['cluster_id']][0]],
                  'sample': f"face/{r['sample']}.jpg", 'latest': latest.get(r['cluster_id'], '')}
         entry['retired'] = bool(entry['label']) and top[r['cluster_id']][0] in retired
+        entry['family'] = bool(entry['label']) and top[r['cluster_id']][0] in family
         if cid == UNCLUSTERED:
             tail = entry
         elif r['n'] >= min_faces:
@@ -281,6 +283,14 @@ def set_retired(conn, name, retired=True):
     """Mark a named person as someone I used to know (or bring them back). Their clusters leave
     the naming list; their faces keep the name. Returns False if no one has that name."""
     cur = conn.execute("UPDATE persons SET retired = ? WHERE name = ?", (int(bool(retired)), name.strip()))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def set_family(conn, name, family=True):
+    """Mark a named person as family (or not); their clusters head the list. Returns False if
+    no one has that name."""
+    cur = conn.execute("UPDATE persons SET family = ? WHERE name = ?", (int(bool(family)), name.strip()))
     conn.commit()
     return cur.rowcount > 0
 
