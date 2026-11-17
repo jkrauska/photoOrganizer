@@ -833,6 +833,23 @@ def test_ark_face_sharpness_scores_blur_low():
     assert crisp > 100 > soft and face_sharpness(im, (5, 5, 6, 6)) == 0.0
 
 
+def test_ark_sharpness_backfill_scores_earlier_faces_in_worker_processes(tmp_path):
+    from photo_organizer.analysis import ark
+    conn = ark.open_db(str(tmp_path / 'analysis.db'))
+    rng = __import__('numpy').random.default_rng(0)
+    for i in range(3):
+        p = tmp_path / f'{i}.jpg'
+        Image.fromarray((rng.random((120, 120, 3)) * 255).astype('uint8')).save(p, quality=95)
+        conn.execute("INSERT INTO images (sha256, path) VALUES (?, ?)", (f'h{i}', str(p)))
+        conn.execute("INSERT INTO faces (sha256, face_idx, x1, y1, x2, y2) VALUES (?, 0, 10, 10, 110, 110)", (f'h{i}',))
+    conn.execute("INSERT INTO images (sha256, path) VALUES ('gone', '/nowhere.jpg')")
+    conn.execute("INSERT INTO faces (sha256, face_idx, x1, y1, x2, y2) VALUES ('gone', 0, 1, 1, 9, 9)")
+    conn.commit()
+    assert ark.backfill_sharpness(conn, workers=2, log=lambda s: None) == 3
+    assert conn.execute("SELECT COUNT(*) FROM faces WHERE sharpness > 100").fetchone()[0] == 3
+    assert ark.backfill_sharpness(conn, workers=2, log=lambda s: None) == 0, "only the unreadable one is left"
+
+
 def test_ark_faces_too_blurry_faces_are_hidden_but_named_with_their_cluster(tmp_path):
     from photo_organizer.analysis import ark_faces
     db, conn = _ark_face_db(tmp_path)

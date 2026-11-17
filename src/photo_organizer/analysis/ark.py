@@ -275,29 +275,30 @@ def _store_faces(conn, sha, faces, im=None):
              None if im is None else face_sharpness(im, f['bbox'])))
 
 
-def backfill_sharpness(conn, workers=8, log=print):
-    """Score the faces found before sharpness was recorded, newest folders first. Images load
-    in parallel (it is mostly waiting on the store); the scores are written here. Returns faces scored."""
-    from concurrent.futures import ThreadPoolExecutor
-    todo = conn.execute("SELECT i.sha256, i.path FROM images i WHERE EXISTS (SELECT 1 FROM faces f "
-                        "WHERE f.sha256 = i.sha256 AND f.sharpness IS NULL) ORDER BY i.path DESC").fetchall()
-    log(f"{len(todo):,} images with faces to score")
+def _sharpness_of(job):
+    """(sha, [(score, face id)], error) for one image's face boxes; runs in a worker process."""
+    sha, path, boxes = job
+    try:
+        im, _ = load_image(path)
+    except Exception as e:
+        return sha, None, f"{type(e).__name__}: {e}"
+    return sha, [(face_sharpness(im, b), fid) for fid, b in boxes], None
 
-    def score(row):
-        sha, path = row
-        boxes = boxes_of[sha]
-        try:
-            im, _ = load_image(path)
-        except Exception as e:
-            return sha, None, f"{type(e).__name__}: {e}"
-        return sha, [(face_sharpness(im, b), fid) for fid, b in boxes], None
 
+def backfill_sharpness(conn, workers=None, log=print):
+    """Score the faces found before sharpness was recorded, newest folders first. Decoding is CPU
+    work, so images go to worker processes (one per core by default); the scores are written
+    here. Returns faces scored."""
+    from concurrent.futures import ProcessPoolExecutor
     boxes_of = {}
     for fid, sha, *b in conn.execute("SELECT id, sha256, x1, y1, x2, y2 FROM faces WHERE sharpness IS NULL"):
         boxes_of.setdefault(sha, []).append((fid, b))
+    todo = [(sha, path, boxes_of[sha]) for sha, path in
+            conn.execute("SELECT sha256, path FROM images ORDER BY path DESC") if sha in boxes_of]
+    log(f"{len(todo):,} images with faces to score")
     start, n, failed = time.time(), 0, 0
-    with ThreadPoolExecutor(workers) as ex:
-        for i, (sha, scores, err) in enumerate(ex.map(score, todo), 1):
+    with ProcessPoolExecutor(workers or os.cpu_count()) as ex:
+        for i, (sha, scores, err) in enumerate(ex.map(_sharpness_of, todo, chunksize=8), 1):
             if err:
                 failed += 1
             else:
@@ -592,7 +593,7 @@ def main():
     p.add_argument('--seed', type=int, help='fix the random day order')
     p.add_argument('--model', default=DEFAULT_VLM)
     p = sub.add_parser('sharpness', help='score how crisp each face found earlier is')
-    p.add_argument('--workers', type=int, default=8)
+    p.add_argument('--workers', type=int, help='processes (default: one per core)')
     sub.add_parser('stats')
     args = parser.parse_args()
 
