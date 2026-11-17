@@ -52,11 +52,16 @@ def ensure_db(db_path):
 
 
 def _cluster_where(cid):
+    """SQL for a cluster id: 'c12', 'unclustered', or several clusters shown as one person's row
+    ('c12+c40+c41', see list_clusters)."""
     if cid == UNCLUSTERED:
         return "f.cluster_id IS NULL", ()
-    if not cid.startswith('c') or not cid[1:].lstrip('-').isdigit():
+    parts = cid.split('+')
+    if not all(p.startswith('c') and p[1:].lstrip('-').isdigit() for p in parts):
         raise KeyError(cid)
-    return "f.cluster_id = ?", (int(cid[1:]),)
+    if len(parts) == 1:
+        return "f.cluster_id = ?", (int(cid[1:]),)
+    return f"f.cluster_id IN ({','.join('?' * len(parts))})", tuple(int(p[1:]) for p in parts)
 
 
 def _cluster_name(conn, cid):
@@ -97,8 +102,10 @@ def _cluster_latest(conn):
 
 
 def list_clusters(conn, min_faces=0):
-    """Clusters biggest first, then 'unclustered' last. Clusters with fewer than min_faces faces
-    (the long tail of people seen a handful of times) are left out."""
+    """Clusters biggest first, then 'unclustered' last. A named person's clusters are one row,
+    id 'c12+c40+…' (biggest first; 'groups' says how many), which every cluster call accepts.
+    Rows with fewer than min_faces faces (the long tail of people seen a handful of times) are
+    left out."""
     rows = conn.execute(
         "SELECT cluster_id, COUNT(*) n, SUM(person_source = 'manual') named, "
         "SUM(person_source = 'suggested') suggested, "
@@ -126,10 +133,28 @@ def list_clusters(conn, min_faces=0):
         entry['family'] = bool(entry['label']) and top[r['cluster_id']][0] in family
         if cid == UNCLUSTERED:
             tail = entry
-        elif r['n'] >= min_faces:
+        else:
             items.append(entry)
+    items = [e for e in _by_person(items) if e['count'] >= min_faces]
     items.sort(key=lambda x: (-x['count'], x['id']))
     return items + ([tail] if tail else [])
+
+
+def _by_person(items):
+    """One row per named person (their clusters' counts added up), unnamed clusters as they are."""
+    people, out = {}, []
+    for e in items:
+        if e['label']:
+            people.setdefault(e['label'], []).append(e)
+        else:
+            out.append(dict(e, groups=1))
+    for group in people.values():
+        group.sort(key=lambda x: (-x['count'], x['id']))
+        top = group[0]
+        out.append(dict(top, id='+'.join(e['id'] for e in group), groups=len(group),
+                        **{k: sum(e[k] for e in group) for k in ('count', 'named', 'suggested')},
+                        latest=max(e['latest'] for e in group)))
+    return out
 
 
 def _person_faces(conn, pid):

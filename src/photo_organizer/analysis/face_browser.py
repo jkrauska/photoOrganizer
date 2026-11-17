@@ -666,6 +666,12 @@ async function setRetired(name, retired) {
   await loadClusters();
 }
 
+// The row now holding a cluster: its own, or the person's row it was folded into ('c1+c2').
+function rowOf(id) {
+  const parts = id.split('+');
+  return clusters.find(c => c.id === id) || clusters.find(c => c.id.split('+').includes(parts[0]));
+}
+
 async function setFamily(name, family) {
   await post('api/family', {name, family});
   await loadClusters();
@@ -725,7 +731,7 @@ function renderSidebar() {
         <img src="${c.sample}" loading="lazy">
         <div class="meta">
           <div class="label ${c.label?'':'unlabeled'}">${c.id==='unclustered' ? 'Unclustered faces' : (escapeHtml(c.label) || '(unnamed) ' + c.id)}${c.family ? ' <span class="family" title="Family">♥</span>' : ''}</div>
-          <div class="count">${c.count} face${c.count===1?'':'s'}${c.named?' · '+c.named+' named':''}${c.suggested?' · '+c.suggested+' suggested':''}${sortBy==='recent' && c.latest ? ' · newest '+c.latest : ''}</div>
+          <div class="count">${c.count} face${c.count===1?'':'s'}${c.groups > 1 ? ' in ' + c.groups + ' groups' : ''}${c.named?' · '+c.named+' named':''}${c.suggested?' · '+c.suggested+' suggested':''}${sortBy==='recent' && c.latest ? ' · newest '+c.latest : ''}</div>
         </div>
       </div>`).join('');
 }
@@ -739,7 +745,7 @@ async function selectCluster(id) {
     <div id="header">${isUnclustered
       ? `<h2>Unclustered faces (best detections first) — these didn't group automatically. Name each one below; Enter saves and moves on.</h2>`
       : `<div class="row" id="guessRow"></div>
-         <h2>Name this person (${c.count} face${c.count===1?'':'s'} in ${c.id}). Faces named individually as someone else keep their name.</h2>
+         <h2>Name this person (${c.count} face${c.count===1?'':'s'} in ${c.groups > 1 ? c.groups + ' groups, shown together' : c.id}). Faces named individually as someone else keep their name.</h2>
          <div class="row">
            <input id="labelInput" list="persons" placeholder="Name for the whole cluster…" value="${escapeHtml(c.label)}">
            <button onclick="saveLabel(false)">Save</button>
@@ -1017,16 +1023,20 @@ async function saveFaceLabel(inp) {
 async function saveLabel(advance) {
   const label = document.getElementById('labelInput').value.trim();
   // Only the faces on screen: a big cluster shows its first 500, and the rest are unchecked.
+  const before = sortedClusters();
+  const idx = before.findIndex(x => x.id === currentId);
   await post('api/label', {cluster_id: currentId, label, face_ids: shownIds()});
   await loadClusters();
+  // A name someone already has folds this cluster into that person's row (a new id).
+  currentId = rowOf(currentId)?.id || currentId;
   const total = clusters.find(c => c.id === currentId)?.count || 0;
   if (advance && total <= shownIds().length) {
-    const order = sortedClusters();
-    const idx = order.findIndex(x => x.id === currentId);
-    const next = order.slice(idx + 1).find(x => !x.label && x.id !== 'unclustered')
-              || order.find(x => !x.label && x.id !== 'unclustered' && x.id !== currentId);
+    const ids = new Set(clusters.map(c => c.id));
+    const next = before.slice(idx + 1).find(x => !x.label && x.id !== 'unclustered' && ids.has(x.id))
+              || sortedClusters().find(x => !x.label && x.id !== 'unclustered' && x.id !== currentId);
     if (next) return selectCluster(next.id);
   }
+  renderSidebar();
   await loadFaces();
 }
 

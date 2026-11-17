@@ -805,6 +805,24 @@ def test_ark_faces_forget_deletes_faces_and_crops_but_keeps_named_ones(tmp_path)
     assert [c['id'] for c in ark_faces.list_clusters(conn)] == ['c0']
 
 
+def test_ark_faces_one_row_per_named_person_across_their_clusters(tmp_path):
+    from photo_organizer.analysis import ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    conn.execute("UPDATE faces SET cluster_id = 1 WHERE id = 4")
+    conn.commit()
+    assert [c['id'] for c in ark_faces.list_clusters(conn)] == ['c0', 'c1'], "unnamed: apart"
+    ark_faces.name_cluster(conn, 'c0', 'Alice')
+    ark_faces.name_cluster(conn, 'c1', 'Alice')
+    row, = ark_faces.list_clusters(conn)
+    assert (row['id'], row['count'], row['groups'], row['label']) == ('c0+c1', 4, 2, 'Alice')
+    assert sorted(f['id'] for f in ark_faces.cluster_detail(conn, 'c0+c1')) == [1, 2, 3, 4]
+    assert ark_faces.name_cluster(conn, 'c0+c1', 'Alicia') == 4, "a rename covers every group"
+    assert ark_faces.list_clusters(conn)[0]['label'] == 'Alicia'
+    assert ark_faces.list_clusters(conn, min_faces=4)[0]['id'] == 'c0+c1', "the person's total counts"
+    with pytest.raises(KeyError):
+        ark_faces.cluster_detail(conn, 'c0+x1')
+
+
 def test_ark_faces_family_is_flagged_on_the_named_cluster(tmp_path):
     from photo_organizer.analysis import ark_faces
     db, conn = _ark_face_db(tmp_path)
