@@ -95,8 +95,9 @@ def _cluster_latest(conn):
     return latest
 
 
-def list_clusters(conn):
-    """Clusters biggest first, then 'unclustered' last."""
+def list_clusters(conn, min_faces=0):
+    """Clusters biggest first, then 'unclustered' last. Clusters with fewer than min_faces faces
+    (the long tail of people seen a handful of times) are left out."""
     rows = conn.execute(
         "SELECT cluster_id, COUNT(*) n, SUM(person_source = 'manual') named, "
         "SUM(person_source = 'suggested') suggested, "
@@ -122,7 +123,7 @@ def list_clusters(conn):
         entry['retired'] = bool(entry['label']) and top[r['cluster_id']][0] in retired
         if cid == UNCLUSTERED:
             tail = entry
-        else:
+        elif r['n'] >= min_faces:
             items.append(entry)
     items.sort(key=lambda x: (-x['count'], x['id']))
     return items + ([tail] if tail else [])

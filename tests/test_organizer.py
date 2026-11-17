@@ -733,6 +733,8 @@ def test_ark_faces_lists_clusters_and_names_clusters_and_faces(tmp_path):
     got = ark_faces.list_clusters(conn)
     assert [(c['id'], c['count'], c['label']) for c in got] == [('c0', 3, ''), ('unclustered', 1, '')]
     assert got[0]['sample'] == 'face/1.jpg', "sample is the best detection"
+    assert [c['id'] for c in ark_faces.list_clusters(conn, min_faces=4)] == ['unclustered'], \
+        "a cluster of 3 is long tail; the unclustered faces stay reachable"
     assert [f['id'] for f in ark_faces.cluster_detail(conn, 'unclustered')] == [4]
     with pytest.raises(KeyError):
         ark_faces.cluster_detail(conn, 'x1')
@@ -811,15 +813,15 @@ def test_ark_faces_someone_i_used_to_know_leaves_the_naming_list_but_keeps_the_n
     db, conn = _ark_face_db(tmp_path)
     client = TestClient(make_ark_app(db, tmp_path / 'crops'))
     client.post('/api/label', json={'cluster_id': 'c0', 'label': 'Alice'})
-    assert [c['retired'] for c in client.get('/api/clusters').json()] == [False, False]
+    assert [c['retired'] for c in client.get('/api/clusters?min_faces=1').json()] == [False, False]
     assert client.post('/api/retire', json={'name': 'Alice'}).json()['ok']
-    c0, rest = client.get('/api/clusters').json()
+    c0, rest = client.get('/api/clusters?min_faces=1').json()
     assert c0['label'] == 'Alice' and c0['retired'] and not rest['retired']
     assert client.get('/api/retired').json() == ['Alice']
     assert _ark_names(conn)[1] == ('Alice', 'manual'), "faces keep the name"
     assert client.post('/api/retire', json={'name': 'Nobody'}).status_code == 404
     client.post('/api/retire', json={'name': 'Alice', 'retired': False})
-    assert not client.get('/api/clusters').json()[0]['retired']
+    assert not client.get('/api/clusters?min_faces=1').json()[0]['retired']
     page = client.get('/').text
     assert 'Someone I used to know' in page and 'showRetired' in page
 
@@ -842,7 +844,8 @@ def test_ark_face_browser_app_names_over_http(tmp_path):
     from photo_organizer.analysis.face_browser import make_ark_app
     db, conn = _ark_face_db(tmp_path)
     client = TestClient(make_ark_app(db, tmp_path / 'crops'))
-    assert [c['id'] for c in client.get('/api/clusters').json()] == ['c0', 'unclustered']
+    assert [c['id'] for c in client.get('/api/clusters?min_faces=1').json()] == ['c0', 'unclustered']
+    assert [c['id'] for c in client.get('/api/clusters').json()] == ['unclustered'], "20 faces at least by default"
     assert client.post('/api/label', json={'cluster_id': 'c0', 'label': 'Alice'}).json()['changed'] == 3
     assert client.post('/api/label_face', json={'face_id': 4, 'label': 'Bob'}).status_code == 200
     assert client.post('/api/label_face', json={'face_id': 99, 'label': 'Bob'}).status_code == 404

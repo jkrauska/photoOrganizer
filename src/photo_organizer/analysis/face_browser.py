@@ -42,6 +42,7 @@ ANALYSIS_FILE: Path
 LABELS_FILE: Path
 CROP_DIR: Path
 CROP_THUMB_SIZE = 256
+MIN_CLUSTER_FACES = 20      # the --ark cluster list leaves out people seen fewer times than this
 
 face_index: dict[str, list[dict]] = {}   # uuid -> [{bbox, embedding, ...}, ...]
 photo_paths: dict[str, str] = {}         # uuid -> path used at analysis time
@@ -409,9 +410,9 @@ def make_ark_app(db_path, crop_dir, catalog_path=None) -> FastAPI:
             raise HTTPException(404, "cluster not found")
 
     @ark.get("/api/clusters")
-    def clusters():
+    def clusters(min_faces: int = MIN_CLUSTER_FACES):
         with db() as conn:
-            return ark_faces.list_clusters(conn)
+            return ark_faces.list_clusters(conn, min_faces)
 
     @ark.get("/api/cluster/{cid}")
     def cluster(cid: str, limit: int = 500):
