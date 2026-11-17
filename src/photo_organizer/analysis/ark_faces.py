@@ -8,6 +8,7 @@ and cached crops are deleted. Kept free of FastAPI so it can be tested without t
 """
 
 import io
+import itertools
 import os
 import re
 import time
@@ -282,6 +283,25 @@ def set_retired(conn, name, retired=True):
     cur = conn.execute("UPDATE persons SET retired = ? WHERE name = ?", (int(bool(retired)), name.strip()))
     conn.commit()
     return cur.rowcount > 0
+
+
+USED_TO_KNOW = 'Someone I used to know'
+
+
+def retire_cluster(conn, cid):
+    """Someone I used to know, for a cluster: a named cluster's person is retired; an unnamed one
+    is named 'Someone I used to know #N' first (names stick to faces, so it survives re-clustering)
+    and then retired. Returns the name."""
+    if cid == UNCLUSTERED:
+        raise ValueError("unclustered faces aren't one person")
+    pid, name = _cluster_name(conn, cid)
+    if pid is None:
+        taken = {r[0] for r in conn.execute("SELECT name FROM persons WHERE name LIKE ?", (USED_TO_KNOW + ' #%',))}
+        name = next(f"{USED_TO_KNOW} #{i}" for i in itertools.count(1) if f"{USED_TO_KNOW} #{i}" not in taken)
+        if not name_cluster(conn, cid, name):
+            raise KeyError(cid)
+    set_retired(conn, name)
+    return name
 
 
 def name_faces(conn, face_ids, name):

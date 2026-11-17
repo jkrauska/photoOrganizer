@@ -380,6 +380,10 @@ class ArkGuessNoIn(BaseModel):
     name: str
 
 
+class ArkClusterIn(BaseModel):
+    cluster_id: str
+
+
 class ArkRetireIn(BaseModel):
     name: str
     retired: bool = True
@@ -437,6 +441,17 @@ def make_ark_app(db_path, crop_dir, catalog_path=None) -> FastAPI:
     def persons():
         with db() as conn:
             return ark_faces.persons(conn)
+
+    @ark.post("/api/retire_cluster")
+    def retire_cluster(body: ArkClusterIn):
+        """Someone I used to know, unnamed or not: leaves the naming list under a placeholder name."""
+        with db() as conn:
+            try:
+                return {"ok": True, "name": ark_faces.retire_cluster(conn, body.cluster_id)}
+            except KeyError:
+                raise HTTPException(404, "cluster not found")
+            except ValueError as e:
+                raise HTTPException(400, str(e))
 
     @ark.get("/api/retired")
     def retired():
@@ -635,6 +650,15 @@ async function setRetired(name, retired) {
   await loadClusters();
 }
 
+async function retireCluster(id) {
+  // Like Save & Next: the cluster leaves the list, so move on to the next one.
+  const order = sortedClusters().filter(c => c.id !== 'unclustered');
+  const next = order[order.findIndex(c => c.id === id) + 1];
+  await post('api/retire_cluster', {cluster_id: id});
+  await loadClusters();
+  if (next) selectCluster(next.id);
+}
+
 function setSort(v) {
   sortBy = v;
   try { localStorage.setItem('arkSort', v); } catch (e) {}
@@ -701,7 +725,8 @@ async function selectCluster(id) {
            <button class="primary" onclick="saveLabel(true)">Save &amp; Next ⏎</button>
            ${c.label ? `<label class="retire" title="Keep the name, but leave this person out of the naming list">
              <input type="checkbox" ${c.retired?'checked':''} onchange="setRetired(${escapeHtml(JSON.stringify(c.label))}, this.checked)">
-             Someone I used to know</label>` : ''}
+             Someone I used to know</label>`
+             : `<button title="Name them 'Someone I used to know #N' and leave them out of the naming list" onclick="retireCluster('${c.id}')">Someone I used to know</button>`}
          </div>`}
       <div class="row" id="suggRow"></div>
       <div class="row" id="forgetRow"></div>

@@ -805,6 +805,20 @@ def test_ark_faces_forget_deletes_faces_and_crops_but_keeps_named_ones(tmp_path)
     assert [c['id'] for c in ark_faces.list_clusters(conn)] == ['c0']
 
 
+def test_ark_faces_unnamed_cluster_becomes_someone_i_used_to_know(tmp_path):
+    from photo_organizer.analysis import ark_faces
+    db, conn = _ark_face_db(tmp_path)
+    assert ark_faces.retire_cluster(conn, 'c0') == 'Someone I used to know #1'
+    c0 = ark_faces.list_clusters(conn)[0]
+    assert c0['label'] == 'Someone I used to know #1' and c0['retired']
+    assert ark_faces.retired_persons(conn) == ['Someone I used to know #1']
+    assert ark_faces.retire_cluster(conn, 'c0') == 'Someone I used to know #1', "already named: kept"
+    with pytest.raises(ValueError):
+        ark_faces.retire_cluster(conn, 'unclustered')
+    with pytest.raises(KeyError):
+        ark_faces.retire_cluster(conn, 'c9')
+
+
 def test_ark_faces_someone_i_used_to_know_leaves_the_naming_list_but_keeps_the_name(tmp_path):
     pytest.importorskip('fastapi')
     pytest.importorskip('httpx')
