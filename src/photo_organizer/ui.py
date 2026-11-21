@@ -8,6 +8,7 @@
   /places/   map of where photos were taken, filtered by place, people and years
   /shuffle/  random walk through the store, with 1-5 scores
   /timelapse/  growing-up timelapses: each month's photo, swap picks, rebuild the video
+  /offsite/  the S3 Deep Archive copy; its nav link carries a red/yellow/green dot
 
   photo-ui [--host 0.0.0.0] [--port 8077]
 """
@@ -25,7 +26,7 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from photo_organizer import status
+from photo_organizer import offsite_ui, status
 from photo_organizer.analysis import day_browser, face_browser, face_finder, places, shuffle, timelapse
 from photo_organizer.analysis.ark import DEFAULT_ANALYSIS_DB
 from photo_organizer.db import DEFAULT_DB_PATH
@@ -33,7 +34,7 @@ from photo_organizer.db import DEFAULT_DB_PATH
 NAV = [('/', 'status', 'Status'), ('/archive', 'archive', 'Archive'), ('/days/', 'days', 'Days'),
        ('/faces/', 'faces', 'Faces'), ('/finder/', 'finder', 'Face Finder'), ('/places/', 'places', 'Places'),
        ('/shuffle/', 'shuffle', 'Shuffle'),
-       ('/timelapse/', 'timelapse', 'Timelapse')]
+       ('/timelapse/', 'timelapse', 'Timelapse'), ('/offsite/', 'offsite', 'Offsite<i id="offsite-dot"></i>')]
 NAV_STYLE = """<style>
 #ark-nav { position:fixed; top:0; left:0; right:0; height:36px; z-index:1000; display:flex; align-items:center;
   gap:2px; padding:0 12px; background:#1d1d1f; font:500 13px -apple-system, system-ui, sans-serif;
@@ -42,6 +43,8 @@ NAV_STYLE = """<style>
 #ark-nav a { color:#b8b8be; text-decoration:none; padding:5px 10px; border-radius:6px; white-space:nowrap; }
 #ark-nav a:hover { background:#333; color:#fff; }
 #ark-nav a.on { background:#2f6fde; color:#fff; }
+#offsite-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-left:6px; background:#555; }
+#offsite-dot.green { background:#34c759; } #offsite-dot.yellow { background:#ffcc00; } #offsite-dot.red { background:#ff3b30; }
 body { padding-top:36px; box-sizing:border-box; }
 header { top:36px; }
 </style>"""
@@ -57,7 +60,9 @@ def with_nav(html, active, overlay=False):
     """The page with the shared nav bar (its own Status/Archive links give way to it)."""
     links = ''.join(f'<a href="{href}"{" class=on" if key == active else ""}>{label}</a>' for href, key, label in NAV)
     # stopPropagation: the shuffle page steps to another photo on any click.
-    bar = f'<nav id="ark-nav" onclick="event.stopPropagation()"><b>photoArk</b>{links}</nav>'
+    bar = (f'<nav id="ark-nav" onclick="event.stopPropagation()"><b>photoArk</b>{links}</nav>'
+           "<script>fetch('/offsite/api/light').then(r => r.json())"
+           ".then(s => document.getElementById('offsite-dot').className = s.light).catch(() => {});</script>")
     if active in ('status', 'archive'):
         html = re.sub(r'<nav>.*?</nav>', '', html, count=1, flags=re.S)
     html = html.replace('</head>', NAV_STYLE + (OVERLAY_STYLE if overlay else '') + '</head>', 1)
@@ -73,6 +78,7 @@ def make_app(catalog, analysis_db, port, crops, thumbs, cache):
         'places': (places.make_app(catalog, analysis_db, thumbs), places.PAGE, False),
         'shuffle': (shuffle.make_app(catalog, analysis_db, cache), shuffle.PAGE, True),
         'timelapse': (timelapse.make_app(analysis_db, catalog_path=catalog), timelapse.PAGE, False),
+        'offsite': (offsite_ui.make_app(catalog), offsite_ui.PAGE, False),
     }
     for key, (sub, page, overlay) in pages.items():
         # Each page's URLs are relative, so it needs the trailing slash to find its API.

@@ -25,6 +25,7 @@ FACES_PORT ?= 8078
 UI_HOST ?= 0.0.0.0
 DAYS_PORT ?= 8079
 SHUFFLE_PORT ?= 8080
+BUCKET  ?=
 
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
@@ -42,7 +43,8 @@ STOP_FILE ?= $(HOME)/.photo-organizer/STOP
 QUEUE = uv run photo-organizer-queue --db "$(CATALOG)"
 
 .PHONY: help sync require-sources inventory run queue queue-photos set-date queue-list cameras cameras-stats locations locations-infer locations-stats worker worker-bg ark-follow ark-sharpness stop verify status enrich faces browse test \
-	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui ui
+	ark-faces ark-faces-spread ark-describe ark-days ark-seed ark-stats ark-faces-ui ark-days-ui ark-shuffle-ui ui \
+	offsite-plan offsite-upload offsite-verify
 
 help:
 	@echo "make inventory  dry run: catalog + date + plan every file in SOURCES (nothing moves)"
@@ -72,6 +74,9 @@ help:
 	@echo "make ark-faces-ui  name face clusters in the photoArk analysis DB (http://$(shell hostname):$(FACES_PORT))"
 	@echo "make ark-days-ui  browse and search the day summaries (http://$(shell hostname):$(DAYS_PORT))"
 	@echo "make ark-shuffle-ui  random walk through the store, score photos 1-5 (http://$(shell hostname):$(SHUFFLE_PORT))"
+	@echo "make offsite-plan [ONLY=1999,2000]   tars the offsite backup would make, with sizes"
+	@echo "make offsite-upload [ONLY=...]   stream finished years/months to S3 Deep Archive (BUCKET=$(BUCKET)); rerun to resume"
+	@echo "make offsite-verify  S3 still has every tar at its size (the Offsite tab has a button too)"
 	@echo "make test       run the test suite"
 	@echo
 	@echo "Paths come from config.mk (gitignored; copy config.mk.example) or the command line."
@@ -204,6 +209,17 @@ ui:
 ark-shuffle-ui:
 	uv sync --quiet --extra analysis
 	uv run photo-shuffle --host $(UI_HOST) --port $(SHUFFLE_PORT)
+
+offsite-plan: sync
+	uv run photo-offsite plan --ark "$(DEST)" $(if $(ONLY),--only $(ONLY))
+
+offsite-upload: sync | $(LOGDIR)
+	@test -n "$(BUCKET)" || { echo 'BUCKET is empty: set it in config.mk (see scripts/offsite-setup.sh)'; exit 2; }
+	caffeinate -i uv run photo-offsite upload --ark "$(DEST)" --bucket "$(BUCKET)" $(if $(ONLY),--only $(ONLY)) \
+		2>&1 | tee "$(LOGDIR)/offsite-upload-$(STAMP).log"
+
+offsite-verify: sync
+	uv run photo-offsite verify
 
 test:
 	uv run pytest -q

@@ -109,6 +109,35 @@ sqlite3 ~/.photo-organizer/catalog.db \
   "SELECT original_path, error_message FROM files WHERE status IN ('review','ignored','error')"
 ```
 
+### Offsite backup (S3 Glacier Deep Archive)
+
+One offsite copy for a disaster, at about $1/TB/month. Each year of the store becomes one plain
+tar in Deep Archive (years over 64 GiB get one tar per month, and months over 64 GiB are cut into
+parts `2023-06.1`, `2023-06.2`, ...), streamed from the NAS with nothing
+staged on disk. Every tar has a manifest (path, size, mtime, sha256 and the tar's S3 URI per file),
+and `index.tsv` lists every tar with its URI, size and sha256. Both stay in S3 Standard and in
+`~/.photo-organizer/offsite/`, so you can find a file without thawing anything. Keep a copy of
+that folder outside the house as well.
+
+```bash
+scripts/offsite-setup.sh my-photo-ark us-west-2   # once, admin creds: Object Lock bucket + upload-only "photoark" profile
+make offsite-plan ONLY=1999,2000                  # tars, file counts, sizes
+make offsite-upload ONLY=1999,2000                # BUCKET from config.mk; drop ONLY for every finished year/month
+make offsite-verify                               # S3 still lists every tar at its recorded size
+uv run photo-offsite restore 2009                 # yearly: Bulk thaw (up to 48 h) ...
+uv run photo-offsite check 2009                   # ... then download it and compare its sha256
+```
+
+Upload skips units that are already backed up and the current year or month, so rerun it to resume or
+to pick up a year once it's over. If photos land in a year that's already backed up, the Offsite
+tab counts them; `photo-offsite upload --only 2010 --redo` uploads it again (Object Lock keeps
+the old version for its year of retention).
+
+The **Offsite** tab in `make ui` shows a dot on its nav link. Red means S3 is missing a tar or has it at
+the wrong size. Yellow means the copy was never verified, was last verified more than 90 days ago,
+couldn't be checked, or a backed-up year has gained files. Green means none of those. Its
+**Verify now** button runs the same bucket listing as `make offsite-verify`, which costs a fraction of a cent.
+
 ### Tests
 
 ```bash
@@ -178,6 +207,7 @@ Code lives under `src/photo_organizer/`:
 - `progress.py` / `status.py`: live run state and the status web page
 - `cameras.py` / `locations.py`: camera, lens and GPS of stored files, read by exiftool on the NAS;
   places named offline from GeoNames, regions from `~/.photo-organizer/regions.json`
+- `offsite.py` / `offsite_ui.py`: the S3 Deep Archive copy and its Offsite tab
 - `report.py`, `hashing.py`, `state.py`, `constants.py`
 - `analysis/`: `analyze`, `cluster`, `enrich`, `index`, `face_browser`, plus `paths` for the data directory
 - `analysis/ark*`, `days`, `shuffle`, `timelapse`, `face_finder`, `places`, `screenshots`: the same

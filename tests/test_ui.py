@@ -30,7 +30,7 @@ def test_one_server_serves_every_page_with_the_nav_and_keeps_queue_changes_local
 
     for path, active in [('/', 'Status'), ('/archive', 'Archive'), ('/days/', 'Days'),
                          ('/faces/', 'Faces'), ('/finder/', 'Face Finder'), ('/places/', 'Places'),
-                         ('/shuffle/', 'Shuffle')]:
+                         ('/shuffle/', 'Shuffle'), ('/offsite/', 'Offsite<i id="offsite-dot"></i>')]:
         r = client.get(path)
         assert r.status_code == 200 and 'id="ark-nav"' in r.text, path
         assert f'class=on>{active}</a>' in r.text, path

@@ -7,6 +7,9 @@ SOURCES ?= /Volumes/Backup/Pictures,/Volumes/OldLaptop/Photos
 # Root of the canonical store, laid out as YYYY/MM/YYYY-MM-DD/.
 DEST ?= /Volumes/photoArk
 
+# S3 bucket for the offsite Deep Archive copy (created by scripts/offsite-setup.sh BUCKET REGION).
+BUCKET ?= my-photo-ark
+
 # Your real email or project URL for the Nominatim User-Agent, required by its usage policy
 # when geocoding; placeholder contacts are answered with 403.
 # export PHOTO_ORGANIZER_CONTACT = me@my-real-domain.example
