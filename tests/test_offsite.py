@@ -39,10 +39,27 @@ def test_verify_and_light_track_s3_staleness_and_files_added_after_backup(tmp_pa
            [{'k': 'index.tsv', 's': 1, 'c': 'STANDARD'}]
 
     assert offsite.summary(catalog, state, today)['light'] == 'yellow', 'never verified'
-    offsite.verify(state, lister=lambda b: good)
+    s = offsite.summary(catalog, state, today)
+    assert s['buckets'] == [{'bucket': 'b', 'region': None, 'index_class': None, 'units': 2, 'bytes': 200}]
+    offsite.verify(state, lister=lambda b: good, region_of=lambda b: 'us-west-2')
     s = offsite.summary(catalog, state, today)
     assert s['light'] == 'green', s['reasons']
-    assert s['not_backed_up'] == [{'year': '2001', 'files': 1, 'open': False}]
+    assert s['buckets'][0]['region'] == 'us-west-2' and s['buckets'][0]['index_class'] == 'STANDARD'
+    assert {(u['tar_class'], u['manifest_class']) for u in s['units']} == {('DEEP_ARCHIVE', 'STANDARD')}
+    assert s['not_backed_up'] == [{'year': '2001', 'files': 1, 'open': False, 'uploading': False}]
+
+    dead = offsite.subprocess.Popen(['true'])
+    dead.wait()
+    (state / 'uploading').mkdir()
+    for unit, pid in [('2001', offsite.os.getpid()), ('2002', dead.pid)]:
+        offsite.progress_path(unit, state).write_text(offsite.json.dumps(
+            {'unit': unit, 'pid': pid, 'started_at': '2026-01-02T00:00:00', 'files': 1, 'bytes': 100,
+             'files_done': 0, 'bytes_done': 40}))
+    s = offsite.summary(catalog, state, today)
+    assert s['light'] == 'green', 'an upload in progress is not a problem'
+    assert [(u['unit'], u['status']) for u in s['units']] == [('1999', 'ok'), ('2000', 'ok'), ('2001', 'in progress')]
+    assert s['not_backed_up'][0]['uploading']
+    offsite.progress_path('2001', state).unlink()
     assert offsite.summary(catalog, state, today + dt.timedelta(days=offsite.STALE_DAYS + 1))['light'] == 'yellow'
 
     with sqlite3.connect(catalog) as conn:
@@ -52,9 +69,10 @@ def test_verify_and_light_track_s3_staleness_and_files_added_after_backup(tmp_pa
     assert s['light'] == 'yellow' and s['units'][0]['new_files'] == 1
 
     offsite.verify(state, lister=lambda b: [o for o in good if o['k'] != 'tars/2000.tar']
-                   + [{'k': 'tars/1999.tar', 's': 99, 'c': 'DEEP_ARCHIVE'}])
+                   + [{'k': 'tars/1999.tar', 's': 99, 'c': 'DEEP_ARCHIVE'}], region_of=lambda b: 'us-west-2')
     s = offsite.summary(catalog, state, today)
     assert s['light'] == 'red' and [u['status'] for u in s['units']] == ['size', 'missing']
 
-    offsite.verify(state, lister=lambda b: (_ for _ in ()).throw(RuntimeError('no network')))
+    offsite.verify(state, lister=lambda b: (_ for _ in ()).throw(RuntimeError('no network')),
+                   region_of=lambda b: 'us-west-2')
     assert offsite.summary(catalog, state, today)['light'] == 'yellow', "unreachable S3 isn't proof of loss"

@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,6 +46,7 @@ UNIT_MAX_BYTES = 64 * 2**30
 STALE_DAYS = 90
 INDEX_FIELDS = ('unit', 's3_uri', 'source', 'files', 'bytes', 'sha256', 'uploaded_at')
 CHUNK = 1 << 20
+PROGRESS_SECONDS = 10
 
 
 @dataclass
@@ -181,8 +183,45 @@ class HashReader:
         return b
 
 
+def progress_path(name, state=STATE_DIR):
+    return Path(state) / 'uploading' / f'{name}.json'
+
+
+def read_uploading(state=STATE_DIR):
+    """{unit: progress} for uploads whose process is still running; a killed upload leaves its file behind."""
+    live = {}
+    for path in (Path(state) / 'uploading').glob('*.json'):
+        try:
+            p = json.loads(path.read_text())
+            os.kill(p['pid'], 0)
+        except (OSError, ValueError, KeyError):
+            continue
+        live[p['unit']] = p
+    return live
+
+
 def upload_unit(unit, ark, bucket, state=STATE_DIR, log=print):
-    """Stream one tar to Deep Archive, then record its manifest and index line (locally and in S3)."""
+    """Stream one tar to Deep Archive, then record its manifest and index line (locally and in S3).
+    While it runs, uploading/UNIT.json holds its pid and how far it got, for the Offsite tab."""
+    progress = progress_path(unit.name, state)
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    started = dt.datetime.now().isoformat(timespec='seconds')
+
+    def report(files_done, bytes_done):
+        tmp = progress.with_suffix('.tmp')
+        tmp.write_text(json.dumps({'unit': unit.name, 'pid': os.getpid(), 'started_at': started,
+                                   'files': len(unit.files), 'bytes': unit.size,
+                                   'files_done': files_done, 'bytes_done': bytes_done}))
+        tmp.replace(progress)
+
+    report(0, 0)
+    try:
+        return stream_unit(unit, ark, bucket, state, log, report)
+    finally:
+        progress.unlink(missing_ok=True)
+
+
+def stream_unit(unit, ark, bucket, state, log, report):
     key = f'tars/{unit.name}.tar'
     # Sizes the parts (10,000 max) for the classic client, so an overestimate is fine; CRT ignores it
     # and uses the profile's multipart_chunksize (scripts/offsite-setup.sh).
@@ -192,7 +231,7 @@ def upload_unit(unit, ark, bucket, state=STATE_DIR, log=print):
                              '--expected-size', str(expected), '--only-show-errors'],
                             stdin=subprocess.PIPE, env=aws_env(), start_new_session=True)
     out = HashWriter(proc.stdin)
-    rows = []
+    rows, done, reported = [], 0, time.monotonic()
     try:
         tar = tarfile.open(fileobj=out, mode='w|', format=tarfile.PAX_FORMAT, copybufsize=CHUNK)
         for i, (rel, _) in enumerate(unit.files, 1):
@@ -203,6 +242,10 @@ def upload_unit(unit, ark, bucket, state=STATE_DIR, log=print):
                 reader = HashReader(f)
                 tar.addfile(info, reader)
                 rows.append((rel, st.st_size, int(st.st_mtime), reader.sha.hexdigest()))
+            done += st.st_size
+            if time.monotonic() - reported >= PROGRESS_SECONDS:
+                report(i, done)
+                reported = time.monotonic()
             if i % 2000 == 0:
                 log(f'  {unit.name}: {i}/{len(unit.files)} files, {out.bytes / 2**30:.1f} GiB')
         tar.close()
@@ -236,13 +279,21 @@ def upload_unit(unit, ark, bucket, state=STATE_DIR, log=print):
     return index[unit.name]
 
 
-def verify(state=STATE_DIR, lister=None):
+def bucket_region(bucket):
+    # LocationConstraint is null for us-east-1.
+    return json.loads(aws('s3api', 'get-bucket-location', '--bucket', bucket))['LocationConstraint'] or 'us-east-1'
+
+
+def verify(state=STATE_DIR, lister=None, region_of=bucket_region):
     """List the bucket and compare it with index.tsv; the result is saved to verify.json and returned.
-    Each unit is ok, missing, size (wrong length), class (not DEEP_ARCHIVE) or no-manifest."""
+    Each unit is ok, missing, size (wrong length), class (not DEEP_ARCHIVE) or no-manifest.
+    Also records each bucket's region and the storage class S3 reports for every tar and manifest."""
     index = read_index(state)
-    result = {'checked_at': dt.datetime.now().isoformat(timespec='seconds'), 'error': None, 'units': {}, 'extra': []}
+    result = {'checked_at': dt.datetime.now().isoformat(timespec='seconds'), 'error': None, 'units': {}, 'extra': [],
+              'buckets': {}, 'classes': {}}
     try:
         for bucket in sorted({split_uri(r['s3_uri'])[0] for r in index.values()}):
+            result['buckets'][bucket] = {'region': region_of(bucket)}
             listing = lister(bucket) if lister else json.loads(aws(
                 's3api', 'list-objects-v2', '--bucket', bucket, '--output', 'json',
                 '--query', 'Contents[].{k: Key, s: Size, c: StorageClass}') or 'null') or []
@@ -258,6 +309,8 @@ def verify(state=STATE_DIR, lister=None):
                 result['units'][name] = ('missing' if not o else 'size' if o['s'] != int(r['bytes'])
                                          else 'class' if o['c'] != 'DEEP_ARCHIVE'
                                          else 'no-manifest' if manifest not in objects else 'ok')
+                result['classes'][name] = {'tar': o and o['c'], 'manifest': (objects.get(manifest) or {}).get('c')}
+            result['buckets'][bucket]['index_class'] = (objects.get('index.tsv') or {}).get('c')
             result['extra'] += [f's3://{bucket}/{k}' for k in sorted(objects)
                                 if k not in expected and k != 'index.tsv']
     except (RuntimeError, OSError, ValueError) as e:
@@ -299,11 +352,18 @@ def summary(catalog=None, state=STATE_DIR, today=None):
     """Everything the Offsite tab shows: a red/yellow/green light with its reasons, one row per
     unit, and the years the catalog has that aren't backed up at all."""
     today = today or dt.date.today()
-    index, last = read_index(state), read_verify(state)
+    index, last = read_index(state), read_verify(state) or {}
+    classes = last.get('classes', {})
     units = {name: {'unit': name, 'files': int(r['files']), 'bytes': int(r['bytes']), 'uploaded_at': r['uploaded_at'],
-                    's3_uri': r['s3_uri'], 'status': (last or {}).get('units', {}).get(name, 'unverified'),
-                    'new_files': 0}
+                    's3_uri': r['s3_uri'], 'status': last.get('units', {}).get(name, 'unverified'),
+                    'tar_class': classes.get(name, {}).get('tar'),
+                    'manifest_class': classes.get(name, {}).get('manifest'), 'new_files': 0}
              for name, r in index.items()}
+    seen = last.get('buckets', {})
+    buckets = [{'bucket': b, 'region': seen.get(b, {}).get('region'), 'index_class': seen.get(b, {}).get('index_class'),
+                'units': sum(split_uri(u['s3_uri'])[0] == b for u in units.values()),
+                'bytes': sum(u['bytes'] for u in units.values() if split_uri(u['s3_uri'])[0] == b)}
+               for b in sorted({split_uri(u['s3_uri'])[0] for u in units.values()})]
     missing_years = {}
     if catalog and os.path.exists(catalog):
         ark = next(iter(index.values()))['source'] if index else DEFAULT_ARK
@@ -320,7 +380,14 @@ def summary(catalog=None, state=STATE_DIR, today=None):
             else:
                 missing_years[rel[:4]] = missing_years.get(rel[:4], 0) + 1
 
-    bad = [u['unit'] for u in units.values() if u['status'] not in ('ok', 'unverified')]
+    uploading = read_uploading(state)
+    for name, p in uploading.items():
+        if name not in units:
+            units[name] = {'unit': name, 'files': p['files'], 'bytes': p['bytes'], 'uploaded_at': None,
+                           's3_uri': None, 'status': 'in progress', 'tar_class': None, 'manifest_class': None,
+                           'new_files': 0}
+        units[name]['progress'] = p
+    bad = [u['unit'] for u in units.values() if u['status'] not in ('ok', 'unverified', 'in progress')]
     reasons, light = [], 'green'
     if bad:
         light = 'red'
@@ -345,9 +412,10 @@ def summary(catalog=None, state=STATE_DIR, today=None):
         reasons.append(f"files added after backup: {', '.join(drifted)}")
     if light == 'green' and reasons:
         light = 'yellow'
-    return {'light': light, 'reasons': reasons, 'verified_at': (last or {}).get('checked_at'),
+    return {'light': light, 'reasons': reasons, 'verified_at': last.get('checked_at'), 'buckets': buckets,
             'units': sorted(units.values(), key=lambda u: u['unit']),
-            'not_backed_up': [{'year': y, 'files': n, 'open': is_open(y, today)}
+            'not_backed_up': [{'year': y, 'files': n, 'open': is_open(y, today),
+                               'uploading': any(u[:4] == y for u in uploading)}
                               for y, n in sorted(missing_years.items())]}
 
 

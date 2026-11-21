@@ -137,6 +137,9 @@ The **Offsite** tab in `make ui` shows a dot on its nav link. Red means S3 is mi
 the wrong size. Yellow means the copy was never verified, was last verified more than 90 days ago,
 couldn't be checked, or a backed-up year has gained files. Green means none of those. Its
 **Verify now** button runs the same bucket listing as `make offsite-verify`, which costs a fraction of a cent.
+Verify also records the bucket's region and the storage class S3 reports for each tar, manifest and
+`index.tsv`, and the tab shows them. A unit whose upload is running is listed as in progress, with
+how many of its files and bytes have gone up so far.
 
 ### Tests
 
