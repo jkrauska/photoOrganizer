@@ -231,7 +231,8 @@ def stream_unit(unit, ark, bucket, state, log, report):
                              '--expected-size', str(expected), '--only-show-errors'],
                             stdin=subprocess.PIPE, env=aws_env(), start_new_session=True)
     out = HashWriter(proc.stdin)
-    rows, done, reported = [], 0, time.monotonic()
+    rows, done, logged_step = [], 0, 0
+    t0 = reported = time.monotonic()
     try:
         tar = tarfile.open(fileobj=out, mode='w|', format=tarfile.PAX_FORMAT, copybufsize=CHUNK)
         for i, (rel, _) in enumerate(unit.files, 1):
@@ -246,8 +247,13 @@ def stream_unit(unit, ark, bucket, state, log, report):
             if time.monotonic() - reported >= PROGRESS_SECONDS:
                 report(i, done)
                 reported = time.monotonic()
-            if i % 2000 == 0:
-                log(f'  {unit.name}: {i}/{len(unit.files)} files, {out.bytes / 2**30:.1f} GiB')
+            # One line per 10% of the unit's bytes; a file that crosses several steps logs only the last.
+            step = done * 10 // max(unit.size, 1)
+            if step > logged_step and step < 10:
+                logged_step = step
+                secs = max(time.monotonic() - t0, 1e-3)
+                eta = dt.datetime.now() + dt.timedelta(seconds=secs * (unit.size - done) / done)
+                log(f'{step * 10}% complete ({done * 8 / secs / 1e6:.0f}Mb/s) estimated completion time {eta:%H:%M}')
         tar.close()
         proc.stdin.close()
     except BaseException:
